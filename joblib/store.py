@@ -58,109 +58,61 @@ hostname = gethostname()
 pid = os.getpid()
 
 # Flag object
-WAIT = object()
+COMPUTED, MUST_COMPUTE, WAIT = object(), object(), object()
+
+class IllegalOperationError(Exception):
+    pass
+
 
 class DirectoryStore(object):
-    def __init__(self, path, save_npy, mmap_mode, logger):
+    def __init__(self, path, save_npy, mmap_mode):
         self.store_path = os.path.abspath(path)
         self.save_npy = save_npy
         self.mmap_mode = mmap_mode
-        self.logger = logger
 
-    def fetch_or_compute_output(self, task_name_list, input_hash,
-                                compute_callback,
-                                callback_args=(),
-                                callback_kw={},
-                                should_block=True):
-        """ Call to look up a cached function output.
+    def get(self, path):
+        if not isinstance(path, list):
+            raise TypeError("path must be a list of strings")
+        return TaskData(os.path.join(*([self.store_path] + path)),
+                        self.save_npy,
+                        self.mmap_mode)
+                        
+class TaskData(object):
+    """
+    *always* call close on one of these
+    """
+    def __init__(self, task_path, save_npy, mmap_mode):
+        self.task_path = os.path.realpath(task_path)
+        self.save_npy = save_npy
+        self.mmap_mode = mmap_mode
+        self._lockfilename = '%s.lock' % self.task_path
+        self._lockfile = None
+        self._temp_path = None
 
-            This call is a non-trivial in order to support optimistic
-            locking.
+    def __del__(self):
+        if self._lockfile is not None or self._temp_path is not None:
+            import warnings
+            warnings.warn('Did not commit() or rollback(), fix your code!')
 
-            Returns
-            -------
-            The stored or computed data tuple, or, if should_block == False,
-            the ``WAIT`` object if somebody else is computing the data.
-            
-            ## status: string
-            ##     Either 'gotoutput', 'gotlock' or 'inprogress'. 'inprogress'
-            ##     is only possible if ``blocking == True``.
-            ## data: tuple or None
-            ##     If ``status == 'gotoutput'``, this is the stored data tuple.
-            ##     Otherwise, this is None.
-        """
-        work_dir = os.path.join(*([self.store_path] + task_name_list))
-        output_dir = os.path.join(work_dir, input_hash)
-        lockfile = '%s.lock' % output_dir
+    def _check_not_closed(self):
+        if self._status == CLOSED:
+            raise IllegalOperationError('Resources is closed')
 
-        if os.path.exists(output_dir):
-            # We're in luck, result is already computed
-            return self._load_output(output_dir)
-        
-        try:
-            os.makedirs(work_dir)
-        except OSError:
-            if os.path.exists(work_dir):
-                pass # race condition for creating it
-            else:
-                raise
+    def persist_input(self, args, kw):
+        raise NotImplementedError()
 
-        # We may have to compute the result. Wrap the computation in a
-        # pessimistic lock; we don't rely on this, but it can save us CPU
-        # time if it does work.
-        with pessimistic_filebased_lock(lockfile, should_block) as got_lock:
-            if not got_lock:
-                assert not should_block
-                return WAIT
-            # OK, apparently we got the lock. Is that because we
-            # blocked until some other process released it?
-            if not os.path.exists(output_dir):
-                # No, either we're first or pessimistic locking is not working.
-                # Either way we proceed with computation and store it.
-                output = compute_callback(*callback_args, **callback_kw)
-                self._atomic_persist_output(output_dir, output)
-                return output
-            else:
-                pass # fall through; we want to release lock before loading results
-
-        # We reach this point only if we blocked for another process
-        # to compute the results. So now we can load them.
-        return self._load_output(output_dir)           
-
-    def _atomic_persist_output(self, path, output):
-        # Create the files to a temporary directory in the same location,
-        # and then do an atomic directory rename
-        parent_path, dirname = os.path.split(path)
-        target_path = os.path.join(parent_path, dirname)
-        temp_path = tempfile.mkdtemp(prefix='%s-%d-%s-' %
-                                     (hostname, pid, dirname))
-        try:
-            # Dump pickle to temporary directory
-            self._persist_output(temp_path, output)
-            # Move the temporary directory to the target. Other
-            # processes may be doing the same thing...
-            try:
-                os.rename(temp_path, target_path)
-            except OSError:
-                if os.path.exists(target_path):
-                    self.logger.info('Another process simultaneously computed %s' % target_path)
-                else:
-                    raise # something else
-        finally:
-            # Never leave the temporary directory around
-            if os.path.exists(temp_path):
-                shutil.rmtree(temp_path)
-
-    def _persist_output(self, path, output):
-        filename = os.path.join(path, 'output.pkl')
+    def persist_output(self, output):
+        filename = os.path.join(self._temp_path, 'output.pkl')
         if 'numpy' in sys.modules and self.save_npy:
             numpy_pickle.dump(output, filename) 
         else:
             with file(filename, 'w') as f:
                 pickle.dump(output, f, protocol=2)
 
-    def _load_output(self, output_dir):
-        filename = os.path.join(output_dir, 'output.pkl')
+    def fetch_output(self):
+        if not self.is_computed():
+            raise IllegalOperationError('output not stored')
+        filename = os.path.join(self.task_path, 'output.pkl')
         if self.save_npy:
             return numpy_pickle.load(filename, 
                                      mmap_mode=self.mmap_mode)
@@ -168,60 +120,117 @@ class DirectoryStore(object):
             with file(filename, 'r') as f:
                 return pickle.load(f)
 
-@contextmanager
-def pessimistic_filebased_lock(lock_filename, should_block):
-    """ A context manager to lock using a filename.
+    def status(self):
+        return self._status
 
-        We use optimistic locking in addition in case this is not
-        present; e.g., on Windows we simply pretend we have the lock.
-        
-    """
-    if fcntl_lockf is None:
-        yield True
-    else:
+    def is_computed(self):
+        return os.path.exists(self.task_path)
+
+    def attempt_compute_lock(self, blocking=True):
+        """
+        Call this to simultaneously probe whether a task is computed
+        and offer to compute it if not.
+
+        Returns either of COMPUTED, MUST_COMPUTE, or WAIT. If
+        it returns MUST_COMPUTE then you *must* call commit() or
+        rollback(). If 'blocking' is True, then WAIT can not be
+        computed.
+        """
+        # First check if it has already been computed
+        if self.is_computed():
+            return COMPUTED
+
+        # Nope. At this point we may be first, so ensure parent
+        # directory exists.
+        parent_path, dirname = os.path.split(self.task_path)
         try:
-            with file(lock_filename, 'a') as fhandle:
+            os.makedirs(parent_path)
+        except OSError:
+            if os.path.exists(parent_path):
+                pass
+            else:
+                raise
+
+        self._lockfile = None
+        self._temp_path = None
+        try:
+            # Try to acquire pessimistic lock. We don't rely on this, but
+            # it can save us CPU time if it does work.
+            if fcntl_lockf is not None:
+                self._lockfile = file(self._lockfilename, 'a')
                 try:
                     # Get lock
-                    fcntl_lockf(fhandle, LOCK_EX | (LOCK_NB if not should_block else 0))
+                    fcntl_lockf(self._lockfile, LOCK_EX | (LOCK_NB if not blocking else 0))
                 except OSError, e:
-                    if not should_block and e.errno in (os.EACCES, os.EAGAIN):
+                    if not blocking and e.errno in (os.EACCES, os.EAGAIN):
                         # Somebody else has the lock
-                        yield False
+                        self.rollback()
+                        return WAIT
                     else:
                         raise # don't know what could cause this...
-                else:
-                    # At this point we have the lock
-                    yield True
-                    # Release lock (probably redundant as we'll proceed to close the file...
-                    fcntl_lockf(fhandle, LOCK_UN)
-        finally:
+                # OK, apparently we got the lock. Is that because we
+                # blocked until some other process released it, so that
+                # the result is already computed?
+                if self.is_computed():
+                    self.rollback()
+                    return COMPUTED
+
+            # We're first or pessimistic locking is not working
+            # (this includes the case where fcntl_lockf is not None but is
+            # broken!). Either way we proceed with computation;
+            # commit() may then discover there was concurrent computation anyway.
+            self._temp_path = tempfile.mkdtemp(prefix='%s-%d-%s-' %
+                                               (hostname, pid, dirname),
+                                               dir=parent_path)
+            return MUST_COMPUTE
+        except:
+            self.rollback()
+            raise
+
+    def commit(self):
+        """
+        returns False if another process committed in the meantime
+        """
+        # Move the temporary directory to the target. Other
+        # processes may be doing the same thing...
+        try:
             try:
-                os.unlink(lock_filename) # Clean up after ourself
+                os.rename(self._temp_path, self.task_path)
+                self._temp_path = None
+            except OSError:
+                if self.is_computed():
+                    return False
+                else:
+                    raise # something else
+            else:
+                return True
+        finally:
+            # Release locks, and clean up tempdir if the above move failed
+            self.rollback()
+
+    def rollback(self):
+        if self._lockfile is not None:
+            try:
+                fcntl_lockf(self._lockfile, LOCK_UN)
+            except:
+                pass
+            try:
+                self._lockfile.close()
+            except:
+                pass
+            try:
+                os.unlink(self._lockfilename)
             except OSError:
                 pass
+            self._lockfile = None
 
+        if self._temp_path is not None and os.path.exists(self._temp_path):
+            try:
+                shutil.rmtree(self._temp_path)
+            except:
+                pass
+            self._temp_path = None
 
-## def path_splitall(path):
-##     def _split(x):
-##         if x == '':
-##             return []
-##         else:
-##             heads, tail = os.path.split(x)
-##             return _split(heads) + [tail]    
-##     return _split(os.path.normpath(path))
-
-## def racesafe_ensure_path(path):
-##     # TODO: Test on Windows etc.
-##     if os.path.exists(path):
-##         return path
-
-##     pathlist = path_splitall(path)
-##     for i in range(1, len(pathlist)):
-##         leading = os.path.join(pathlist[:i])
-##         try:
-##             os.mkdir(leading)
-##         except OSError:
-##             pass
-
-    
+    def close(self):
+        self.rollback()
+        self.task_path = None

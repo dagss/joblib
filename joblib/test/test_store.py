@@ -5,10 +5,12 @@
 import tempfile
 import shutil
 import os
-from nose.tools import ok_, eq_, with_setup
+from nose.tools import ok_, eq_
 from nose import SkipTest
 
+
 from .. import store
+from ..store import COMPUTED, MUST_COMPUTE, WAIT
 
 #
 # Test fixture
@@ -25,49 +27,63 @@ tempdir = store_instance = mock_logger = None
 def setup_store():
     global tempdir, store_instance, mock_logger
     tempdir = tempfile.mkdtemp()
-    mock_logger = MockLogger()
+#    mock_logger = MockLogger()
     store_instance = store.DirectoryStore(tempdir,
                                           save_npy=True,
-                                          mmap_mode=None,
-                                          logger=mock_logger)
+                                          mmap_mode=None)
+#                                          logger=mock_logger)
                                           
 def teardown_store():
     global tempdir, store_instance, mock_logger
     shutil.rmtree(tempdir)
     tempdir = mock_logger = store_instance = None
     
-NAMELST = ['foo', 'bar']
-HASH = '1234ae'
+PATH = ['foo', 'bar', '1234ae']
 
-with_store = with_setup(setup_store, teardown_store)
+
+import functools
+
+def with_store(func):
+    @functools.wraps(func)
+    def inner():
+        setup_store()
+        try:
+            for x in func():
+                yield x
+        finally:
+            teardown_store()
+    return inner
 
 #
 # Tests
 #
 
-@with_setup(setup_store, teardown_store)
+@with_store
 def test_basic():
+    td = store_instance.get(PATH)
+    yield eq_, td.is_computed(), False
+    yield eq_, td.attempt_compute_lock(blocking=False), MUST_COMPUTE
+    td.persist_output((1, 2, 3))
+    td.rollback()
 
-    timescalled = [0]
+    yield eq_, td.is_computed(), False
+    yield eq_, td.attempt_compute_lock(blocking=False), MUST_COMPUTE
+    td.persist_output((1, 2, 3))
+    td.commit()
+    yield eq_, td.attempt_compute_lock(blocking=False), COMPUTED    
+    yield eq_, td.is_computed(), True
+    yield eq_, td.fetch_output(), (1, 2, 3)
+
+    td.close()
     
-    def compute():
-        timescalled[0] += 1
-        return (1, 2, 3)
-
-    # First time we compute
-    r = store_instance.fetch_or_compute_output(
-        ['foo', 'bar'], HASH, compute)
-    yield eq_, r, (1, 2, 3)
-    yield eq_, timescalled[0], 1
-
-    # Simply fetch from cache
-    r = store_instance.fetch_or_compute_output(
-        ['foo', 'bar'], HASH, compute)
-    yield eq_, r, (1, 2, 3)
-    yield eq_, timescalled[0], 1
+    td = store_instance.get(PATH)
+    yield eq_, td.is_computed(), True
+    yield eq_, td.fetch_output(), (1, 2, 3)
+    yield eq_, td.attempt_compute_lock(blocking=False), COMPUTED    
+    td.close()
 
     # Check contents of dir
-    yield eq_, os.listdir(os.path.join(*([tempdir] + NAMELST + [HASH]))), ['output.pkl']
+    yield eq_, os.listdir(os.path.join(*([tempdir] + PATH))), ['output.pkl']
 
 @with_store
 def test_pessimistic_locking():
