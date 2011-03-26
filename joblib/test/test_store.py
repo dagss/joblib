@@ -85,32 +85,44 @@ def test_basic():
     # Check contents of dir
     yield eq_, os.listdir(os.path.join(*([tempdir] + PATH))), ['output.pkl']
 
+
+def do_pessimistic_lock_tests():
+    # Simple checks. Must also be stress-tested for race conditions,
+    # this is not sufficient.
+    a = store_instance.get(PATH)
+    b = store_instance.get(PATH)
+    yield eq_, a.attempt_compute_lock(blocking=False), MUST_COMPUTE
+    yield eq_, b.attempt_compute_lock(blocking=False), WAIT
+    a.persist_output((1, 2, 3))
+    a.rollback()
+    yield eq_, b.is_computed(), False
+    yield eq_, b.attempt_compute_lock(blocking=False), MUST_COMPUTE
+    b.persist_output((1, 2, 3))
+    yield eq_, a.attempt_compute_lock(blocking=False), WAIT
+    b.commit()
+    yield eq_, a.attempt_compute_lock(blocking=False), COMPUTED
+    
+
 @with_store
-def test_pessimistic_locking():
+def test_thread_locking():
+    old_lockf = store.fcntl_lockf
+    try:
+        # Temporarily disable the lockf mechanism, make
+        # sure we rely on threading only. Probably not necessarry...
+        store.fcntl_lockf = None
+        for x in do_pessimistic_lock_tests():
+            yield x
+        # TODO: Construct a thread that actually waits.
+    finally:
+        store.fcntl_lockf = old_lockf
+
+@with_store
+def test_fcntl_locking():
     try:
         import fcntl
     except ImportError:
         raise SkipTest("Currently only on POSIX platforms")
-
-    # We simulate concurrent access by doing a nested call from
-    # within the callback -- the store can't tell the difference
-
-    nested_checks = []
-
-    def do_fail():
-        nested_checks.append((ok_, False, "Should not try to recompute"))
-
-    def compute():
-        # The store thinks we're busy computing -- now,
-        # hit it with a nonblocking call for the same resource
-        r = store_instance.fetch_or_compute_output(NAMELST, HASH, do_fail,
-                                                   should_block=False)
-        nested_checks.append((eq_, r, store.WAIT, "Should report wait status"))
-        return (1, 2, 3)
-
-    r = store_instance.fetch_or_compute_output(NAMELST, HASH, compute)
-    yield eq_, r, (1, 2, 3)
-    for x in nested_checks: yield x
+#    do_pessimistic_lock_tests()
 
 @with_store
 def test_optimistic_locking():

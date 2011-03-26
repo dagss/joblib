@@ -49,6 +49,8 @@ except ImportError:
     import pickle
 from contextlib import contextmanager
 import tempfile
+import threading
+
 
 # Relative imports
 from . import numpy_pickle
@@ -57,12 +59,25 @@ from . import numpy_pickle
 hostname = gethostname()
 pid = os.getpid()
 
-# Flag object
-COMPUTED, MUST_COMPUTE, WAIT = object(), object(), object()
+# Enums. Feature is simply that they compare by id()
+class Enum(object):
+    def __init__(self, name):
+        self.name = name
+    def __repr__(self):
+        return '<%s>' % self.name
+    
+COMPUTED = Enum('COMPUTED')
+MUST_COMPUTE = Enum('MUST_COMPUTE')
+WAIT = Enum('WAIT')
+
+#
+# In-process synchronization
+#
+_inproc_locks_lock = threading.Lock()
+_inproc_locks = {}
 
 class IllegalOperationError(Exception):
     pass
-
 
 class DirectoryStore(object):
     def __init__(self, path, save_npy, mmap_mode):
@@ -76,7 +91,7 @@ class DirectoryStore(object):
         return TaskData(os.path.join(*([self.store_path] + path)),
                         self.save_npy,
                         self.mmap_mode)
-                        
+
 class TaskData(object):
     """
     *always* call close on one of these
@@ -88,6 +103,7 @@ class TaskData(object):
         self._lockfilename = '%s.lock' % self.task_path
         self._lockfile = None
         self._temp_path = None
+        self._done_event = None
 
     def __del__(self):
         if self._lockfile is not None or self._temp_path is not None:
@@ -134,7 +150,7 @@ class TaskData(object):
         Returns either of COMPUTED, MUST_COMPUTE, or WAIT. If
         it returns MUST_COMPUTE then you *must* call commit() or
         rollback(). If 'blocking' is True, then WAIT can not be
-        computed.
+        returned.
         """
         # First check if it has already been computed
         if self.is_computed():
@@ -154,8 +170,25 @@ class TaskData(object):
         self._lockfile = None
         self._temp_path = None
         try:
-            # Try to acquire pessimistic lock. We don't rely on this, but
-            # it can save us CPU time if it does work.
+            # Try to detect other threads in the same process doing
+            # this; if so we can 
+            with _inproc_locks_lock:
+                done_event = _inproc_locks.get(self.task_path, None)
+                if done_event is None:
+                    self._done_event = _inproc_locks[self.task_path] = threading.Event()
+                    
+            if done_event is not None:
+                if not blocking:
+                    return WAIT
+                else:
+                    done_event.wait()
+                    if self.is_computed():
+                        return COMPUTED
+                    # Else, other thread did a rollback() in the
+                    # end. Fall through to case below.
+
+            # Try to acquire pessimistic file lock. We don't rely on this, but
+            # it can save us CPU time if it does work
             if fcntl_lockf is not None:
                 self._lockfile = file(self._lockfilename, 'a')
                 try:
@@ -212,11 +245,11 @@ class TaskData(object):
         if self._lockfile is not None:
             try:
                 fcntl_lockf(self._lockfile, LOCK_UN)
-            except:
+            except OSError:
                 pass
             try:
                 self._lockfile.close()
-            except:
+            except OSError:
                 pass
             try:
                 os.unlink(self._lockfilename)
@@ -227,9 +260,18 @@ class TaskData(object):
         if self._temp_path is not None and os.path.exists(self._temp_path):
             try:
                 shutil.rmtree(self._temp_path)
-            except:
+            except OSError:
                 pass
             self._temp_path = None
+
+        if self._done_event is not None:
+            with _inproc_locks_lock:
+                try:
+                    del _inproc_locks[self.task_path]
+                except KeyError:
+                    pass
+            self._done_event.set()
+            self._done_event = None
 
     def close(self):
         self.rollback()
