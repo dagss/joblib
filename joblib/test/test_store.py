@@ -7,7 +7,8 @@ import shutil
 import os
 from nose.tools import ok_, eq_
 from nose import SkipTest
-
+import threading
+from time import sleep
 
 from .. import store
 from ..store import COMPUTED, MUST_COMPUTE, WAIT
@@ -53,6 +54,21 @@ def with_store(func):
         finally:
             teardown_store()
     return inner
+
+def with_no_lockf(func):
+    @functools.wraps(func)
+    def inner():
+        old_lockf = store.fcntl_lockf
+        try:
+            # Temporarily disable the lockf mechanism, make
+            # sure we rely on threading only. Probably not necessarry...
+            store.fcntl_lockf = None
+            for x in func():
+                yield x
+        finally:
+            store.fcntl_lockf = old_lockf
+    return inner
+    
 
 #
 # Tests
@@ -104,17 +120,46 @@ def do_pessimistic_lock_tests():
     
 
 @with_store
-def test_thread_locking():
-    old_lockf = store.fcntl_lockf
-    try:
-        # Temporarily disable the lockf mechanism, make
-        # sure we rely on threading only. Probably not necessarry...
-        store.fcntl_lockf = None
-        for x in do_pessimistic_lock_tests():
-            yield x
-        # TODO: Construct a thread that actually waits.
-    finally:
-        store.fcntl_lockf = old_lockf
+# Temporarily disable the lockf mechanism, make
+# sure we rely on threading only. Probably not necessarry...
+@with_no_lockf
+def test_thread_locking_nowait():
+    for x in do_pessimistic_lock_tests():
+        yield x
+
+@with_store
+@with_no_lockf
+def test_thread_locking_wait():
+    # Test with blocking
+    other_beforesleep = threading.Event()
+    other_woke = threading.Event()
+    first_thread_done = False
+    class OtherThread(threading.Thread):
+        def __init__(self):
+            threading.Thread.__init__(self)
+            self.tests = []
+        def run(self):
+            b = store_instance.get(PATH)
+            other_beforesleep.set()
+            r = b.attempt_compute_lock(blocking=True)
+            other_woke.set()
+            self.tests.append((eq_, first_thread_done, True))
+            self.tests.append((eq_, r, COMPUTED))
+            self.tests.append((eq_, b.fetch_output(), (1, 2, 3)))
+
+    a = store_instance.get(PATH)
+    yield eq_, a.attempt_compute_lock(blocking=True), MUST_COMPUTE
+    otherthread = OtherThread()
+    otherthread.start()
+    a.persist_output((1, 2, 3))
+    first_thread_done = True
+    assert other_beforesleep.wait(0.1)
+    sleep(0.1)
+    a.commit()
+    yield eq_, other_woke.wait(0.1), True
+    otherthread.join()
+    for x in otherthread.tests:
+        yield x
 
 @with_store
 def test_fcntl_locking():

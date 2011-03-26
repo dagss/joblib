@@ -176,7 +176,7 @@ class TaskData(object):
                 done_event = _inproc_locks.get(self.task_path, None)
                 if done_event is None:
                     self._done_event = _inproc_locks[self.task_path] = threading.Event()
-                    
+
             if done_event is not None:
                 if not blocking:
                     return WAIT
@@ -186,7 +186,14 @@ class TaskData(object):
                         return COMPUTED
                     # Else, other thread did a rollback() in the
                     # end. Fall through to case below.
-
+            else:
+                # This is needed to guard against a race condition.
+                # This is so that we keep _inproc_locks mostly
+                # empty...
+                if self.is_computed():
+                    self.rollback()
+                    return COMPUTED
+                
             # Try to acquire pessimistic file lock. We don't rely on this, but
             # it can save us CPU time if it does work
             if fcntl_lockf is not None:
