@@ -155,10 +155,6 @@ class TaskData(object):
             import warnings
             warnings.warn('Did not commit() or rollback(), fix your code!')
 
-    def _check_not_closed(self):
-        if self._status == CLOSED:
-            raise IllegalOperationError('Resources is closed')
-
     def persist_input(self, input_repr):
         if self._work_path is None:
             raise IllegalOperationError("call attemt_compute_lock first")
@@ -186,9 +182,6 @@ class TaskData(object):
         else:
             with file(filename, 'r') as f:
                 return pickle.load(f)
-
-    def status(self):
-        return self._status
 
     def is_computed(self):
         return os.path.exists(self.task_path)
