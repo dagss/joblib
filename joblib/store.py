@@ -312,7 +312,7 @@ class TaskData(object):
                 pass
             self._lockfile = None
 
-        if self._work_path is not None and os.path.exists(self._work_path):
+        if self._work_path is not None:
             try:
                 shutil.rmtree(self._work_path)
             except OSError:
