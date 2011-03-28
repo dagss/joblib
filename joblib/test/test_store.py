@@ -8,8 +8,14 @@ import os
 from nose.tools import ok_, eq_, assert_raises
 from nose import SkipTest
 import threading
+import multiprocessing
 from time import sleep
 import functools
+from functools import partial
+try:
+    import queue
+except ImportError:
+    import Queue as queue
 
 from .. import store
 from ..store import COMPUTED, MUST_COMPUTE, WAIT, IllegalOperationError
@@ -91,61 +97,6 @@ def test_errors():
     yield assert_raises, IllegalOperationError, a.persist_output, (1, 2, 3)
 
 
-def do_pessimistic_lock():
-    # Simple checks. Must also be stress-tested for race conditions,
-    # this is not sufficient.
-    a = store_instance.get(PATH)
-    b = store_instance.get(PATH)
-    yield eq_, a.attempt_compute_lock(blocking=False), MUST_COMPUTE
-    yield eq_, b.attempt_compute_lock(blocking=False), WAIT
-    a.persist_output((1, 2, 3))
-    a.rollback()
-    yield eq_, b.is_computed(), False
-    yield eq_, b.attempt_compute_lock(blocking=False), MUST_COMPUTE
-    b.persist_output((1, 2, 3))
-    yield eq_, a.attempt_compute_lock(blocking=False), WAIT
-    b.commit()
-    yield eq_, a.attempt_compute_lock(blocking=False), COMPUTED
-    
-
-@with_store(use_file_locks=False)
-def test_thread_locking_nowait():
-    for x in do_pessimistic_lock():
-        yield x
-
-@with_store(use_file_locks=False)
-def test_thread_locking_wait():
-    # Test with blocking
-    other_beforesleep = threading.Event()
-    other_woke = threading.Event()
-    first_thread_done = False
-    class OtherThread(threading.Thread):
-        def __init__(self):
-            threading.Thread.__init__(self)
-            self.tests = []
-        def run(self):
-            b = store_instance.get(PATH)
-            other_beforesleep.set()
-            r = b.attempt_compute_lock(blocking=True)
-            other_woke.set()
-            self.tests.append((eq_, first_thread_done, True))
-            self.tests.append((eq_, r, COMPUTED))
-            self.tests.append((eq_, b.fetch_output(), (1, 2, 3)))
-
-    a = store_instance.get(PATH)
-    yield eq_, a.attempt_compute_lock(blocking=True), MUST_COMPUTE
-    otherthread = OtherThread()
-    otherthread.start()
-    a.persist_output((1, 2, 3))
-    first_thread_done = True
-    assert other_beforesleep.wait(0.1)
-    sleep(0.1)
-    a.commit()
-    yield eq_, other_woke.wait(0.1), True
-    otherthread.join()
-    for x in otherthread.tests:
-        yield x
-
 @with_store(use_thread_locks=False, use_file_locks=False)
 def test_optimistic_locking():
     a = store_instance.get(PATH)
@@ -158,3 +109,56 @@ def test_optimistic_locking():
     yield eq_, a.commit(), False
     yield eq_, a.fetch_output(), (4, 5, 6)
     yield eq_, b.fetch_output(), (4, 5, 6)
+
+#
+# Test cases reused for in-process and cross-process locking.
+# The core tests are run twice, once with threading and once
+# with multiprocessing.
+#
+def pessimistic_lock_otherthread(store_instance,
+                                 beforesleep_event,
+                                 aftersleep_event):
+    b = store_instance.get(PATH)
+    beforesleep_event.set()
+    eq_(b.attempt_compute_lock(blocking=False), WAIT)
+    eq_(b.is_computed(), False)
+    r = b.attempt_compute_lock(blocking=True)
+    aftersleep_event.set()
+    eq_(r, COMPUTED)
+    eq_(b.fetch_output(), (1, 2, 3))
+
+def do_pessimistic_lock(spawn, Event):
+    # Test with blocking
+    beforesleep_event = Event()
+    aftersleep_event = Event()
+
+    a = store_instance.get(PATH)
+    yield eq_, a.attempt_compute_lock(blocking=True), MUST_COMPUTE
+
+    p = spawn(target=pessimistic_lock_otherthread,
+              args=(store_instance,
+                    beforesleep_event,
+                    aftersleep_event))
+    p.start()
+    a.persist_output((1, 2, 3))
+    assert beforesleep_event.wait(0.1)
+    sleep(0.1)
+    yield eq_, aftersleep_event.is_set(), False
+    a.commit()
+    yield eq_, aftersleep_event.wait(0.1), True
+
+@with_store(use_file_locks=False)
+def test_thread_locking():
+    for x in do_pessimistic_lock(threading.Thread,
+                                 threading.Event):
+        yield x
+
+@with_store(use_thread_locks=False)
+def test_file_locking():
+    try:
+        import fcntl
+    except ImportError:
+        raise SkipTest("fcntl not available")
+    for x in do_pessimistic_lock(multiprocessing.Process,
+                                 multiprocessing.Event):
+        yield x

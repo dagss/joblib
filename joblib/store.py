@@ -41,6 +41,7 @@ try:
     # latter works across (some) network filesystems. Do not mix the
     # two.
     from fcntl import lockf as fcntl_lockf, LOCK_EX, LOCK_SH, LOCK_UN, LOCK_NB
+    from errno import EACCES, EAGAIN    
 except ImportError:
     fcntl_lockf = None
 try:
@@ -217,10 +218,11 @@ class TaskData(object):
                     try:
                         # Get lock
                         fcntl_lockf(self._lockfile, LOCK_EX | (LOCK_NB if not blocking else 0))
-                    except OSError, e:
-                        if not blocking and e.errno in (os.EACCES, os.EAGAIN):
+                    except IOError, e:
+                        self._lockfile = None
+                        self.rollback()
+                        if not blocking and e.errno in (EACCES, EAGAIN):
                             # Somebody else has the lock
-                            self.rollback()
                             return WAIT
                         else:
                             raise # don't know what could cause this...
@@ -268,7 +270,7 @@ class TaskData(object):
         if self._lockfile is not None:
             try:
                 fcntl_lockf(self._lockfile, LOCK_UN)
-            except OSError:
+            except (OSError, IOError):
                 pass
             try:
                 self._lockfile.close()
