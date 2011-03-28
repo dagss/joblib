@@ -73,40 +73,49 @@ WAIT = Enum('WAIT')
 #
 # In-process synchronization
 #
-_inproc_locks_lock = threading.Lock()
-_inproc_locks = {}
+_inproc_events_lock = threading.Lock()
+_inproc_events = {}
 
 class IllegalOperationError(Exception):
     pass
 
 class DirectoryStore(object):
-    def __init__(self, path, save_npy, mmap_mode):
+    def __init__(self, path, save_npy, mmap_mode,
+                 use_thread_locks=True, use_file_locks=True):
         self.store_path = os.path.abspath(path)
         self.save_npy = save_npy
         self.mmap_mode = mmap_mode
+        self._use_thread_locks = use_thread_locks
+        self._use_file_locks = use_file_locks
 
     def get(self, path):
         if not isinstance(path, list):
             raise TypeError("path must be a list of strings")
         return TaskData(os.path.join(*([self.store_path] + path)),
                         self.save_npy,
-                        self.mmap_mode)
+                        self.mmap_mode,
+                        self._use_thread_locks,
+                        self._use_file_locks
+                        )
 
 class TaskData(object):
     """
     *always* call close on one of these
     """
-    def __init__(self, task_path, save_npy, mmap_mode):
+    def __init__(self, task_path, save_npy, mmap_mode,
+                 use_thread_locks=True, use_file_locks=True):
         self.task_path = os.path.realpath(task_path)
         self.save_npy = save_npy
         self.mmap_mode = mmap_mode
         self._lockfilename = '%s.lock' % self.task_path
         self._lockfile = None
-        self._temp_path = None
+        self._work_path = None
         self._done_event = None
+        self._use_thread_locks = use_thread_locks
+        self._use_file_locks = use_file_locks
 
     def __del__(self):
-        if self._lockfile is not None or self._temp_path is not None:
+        if self._lockfile is not None or self._work_path is not None:
             import warnings
             warnings.warn('Did not commit() or rollback(), fix your code!')
 
@@ -115,10 +124,14 @@ class TaskData(object):
             raise IllegalOperationError('Resources is closed')
 
     def persist_input(self, args, kw):
+        if self._work_path is None:
+            raise IllegalOperationError("call attemt_compute_lock first")
         raise NotImplementedError()
 
     def persist_output(self, output):
-        filename = os.path.join(self._temp_path, 'output.pkl')
+        if self._work_path is None:
+            raise IllegalOperationError("call attemt_compute_lock first")
+        filename = os.path.join(self._work_path, 'output.pkl')
         if 'numpy' in sys.modules and self.save_npy:
             numpy_pickle.dump(output, filename) 
         else:
@@ -168,58 +181,61 @@ class TaskData(object):
                 raise
 
         self._lockfile = None
-        self._temp_path = None
+        self._work_path = None
         try:
             # Try to detect other threads in the same process doing
-            # this; if so we can 
-            with _inproc_locks_lock:
-                done_event = _inproc_locks.get(self.task_path, None)
-                if done_event is None:
-                    self._done_event = _inproc_locks[self.task_path] = threading.Event()
+            # this; if so we can
+            if self._use_thread_locks:
+                with _inproc_events_lock:
+                    done_event = _inproc_events.get(self.task_path, None)
+                    if done_event is None:
+                        self._done_event = _inproc_events[self.task_path] = threading.Event()
 
-            if done_event is not None:
-                if not blocking:
-                    return WAIT
-                else:
-                    done_event.wait()
-                    if self.is_computed():
-                        return COMPUTED
-                    # Else, other thread did a rollback() in the
-                    # end. Fall through to case below.
-            else:
-                # This is needed to guard against a race condition.
-                # This is so that we keep _inproc_locks mostly
-                # empty...
-                if self.is_computed():
-                    self.rollback()
-                    return COMPUTED
-                
-            # Try to acquire pessimistic file lock. We don't rely on this, but
-            # it can save us CPU time if it does work
-            if fcntl_lockf is not None:
-                self._lockfile = file(self._lockfilename, 'a')
-                try:
-                    # Get lock
-                    fcntl_lockf(self._lockfile, LOCK_EX | (LOCK_NB if not blocking else 0))
-                except OSError, e:
-                    if not blocking and e.errno in (os.EACCES, os.EAGAIN):
-                        # Somebody else has the lock
+                if done_event is not None:
+                    if not blocking:
                         self.rollback()
                         return WAIT
                     else:
-                        raise # don't know what could cause this...
-                # OK, apparently we got the lock. Is that because we
-                # blocked until some other process released it, so that
-                # the result is already computed?
-                if self.is_computed():
-                    self.rollback()
-                    return COMPUTED
+                        done_event.wait()
+                        if self.is_computed():
+                            return COMPUTED
+                        # Else, other thread did a rollback() in the
+                        # end. Fall through to case below.
+                else:
+                    # This is needed to guard against a race condition.
+                    # This is so that we keep _inproc_events mostly
+                    # empty...
+                    if self.is_computed():
+                        self.rollback()
+                        return COMPUTED
+
+            if self._use_file_locks:
+                # Try to acquire pessimistic file lock. We don't rely on this, but
+                # it can save us CPU time if it does work
+                if fcntl_lockf is not None:
+                    self._lockfile = file(self._lockfilename, 'a')
+                    try:
+                        # Get lock
+                        fcntl_lockf(self._lockfile, LOCK_EX | (LOCK_NB if not blocking else 0))
+                    except OSError, e:
+                        if not blocking and e.errno in (os.EACCES, os.EAGAIN):
+                            # Somebody else has the lock
+                            self.rollback()
+                            return WAIT
+                        else:
+                            raise # don't know what could cause this...
+                    # OK, apparently we got the lock. Is that because we
+                    # blocked until some other process released it, so that
+                    # the result is already computed?
+                    if self.is_computed():
+                        self.rollback()
+                        return COMPUTED
 
             # We're first or pessimistic locking is not working
             # (this includes the case where fcntl_lockf is not None but is
             # broken!). Either way we proceed with computation;
             # commit() may then discover there was concurrent computation anyway.
-            self._temp_path = tempfile.mkdtemp(prefix='%s-%d-%s-' %
+            self._work_path = tempfile.mkdtemp(prefix='%s-%d-%s-' %
                                                (hostname, pid, dirname),
                                                dir=parent_path)
             return MUST_COMPUTE
@@ -235,8 +251,8 @@ class TaskData(object):
         # processes may be doing the same thing...
         try:
             try:
-                os.rename(self._temp_path, self.task_path)
-                self._temp_path = None
+                os.rename(self._work_path, self.task_path)
+                self._work_path = None
             except OSError:
                 if self.is_computed():
                     return False
@@ -264,17 +280,17 @@ class TaskData(object):
                 pass
             self._lockfile = None
 
-        if self._temp_path is not None and os.path.exists(self._temp_path):
+        if self._work_path is not None and os.path.exists(self._work_path):
             try:
-                shutil.rmtree(self._temp_path)
+                shutil.rmtree(self._work_path)
             except OSError:
                 pass
-            self._temp_path = None
+            self._work_path = None
 
         if self._done_event is not None:
-            with _inproc_locks_lock:
+            with _inproc_events_lock:
                 try:
-                    del _inproc_locks[self.task_path]
+                    del _inproc_events[self.task_path]
                 except KeyError:
                     pass
             self._done_event.set()

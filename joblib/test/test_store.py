@@ -5,13 +5,14 @@
 import tempfile
 import shutil
 import os
-from nose.tools import ok_, eq_
+from nose.tools import ok_, eq_, assert_raises
 from nose import SkipTest
 import threading
 from time import sleep
+import functools
 
 from .. import store
-from ..store import COMPUTED, MUST_COMPUTE, WAIT
+from ..store import COMPUTED, MUST_COMPUTE, WAIT, IllegalOperationError
 
 #
 # Test fixture
@@ -25,56 +26,39 @@ class MockLogger(object):
 
 tempdir = store_instance = mock_logger = None
 
-def setup_store():
+def setup_store(**kw):
     global tempdir, store_instance, mock_logger
     tempdir = tempfile.mkdtemp()
-#    mock_logger = MockLogger()
     store_instance = store.DirectoryStore(tempdir,
                                           save_npy=True,
-                                          mmap_mode=None)
-#                                          logger=mock_logger)
+                                          mmap_mode=None,
+                                          **kw)
                                           
 def teardown_store():
     global tempdir, store_instance, mock_logger
     shutil.rmtree(tempdir)
     tempdir = mock_logger = store_instance = None
     
-PATH = ['foo', 'bar', '1234ae']
-
-
-import functools
-
-def with_store(func):
-    @functools.wraps(func)
-    def inner():
-        setup_store()
-        try:
-            for x in func():
-                yield x
-        finally:
-            teardown_store()
-    return inner
-
-def with_no_lockf(func):
-    @functools.wraps(func)
-    def inner():
-        old_lockf = store.fcntl_lockf
-        try:
-            # Temporarily disable the lockf mechanism, make
-            # sure we rely on threading only. Probably not necessarry...
-            store.fcntl_lockf = None
-            for x in func():
-                yield x
-        finally:
-            store.fcntl_lockf = old_lockf
-    return inner
-    
+def with_store(use_thread_locks=True, use_file_locks=True):
+    def with_store_dec(func):
+        @functools.wraps(func)
+        def inner():
+            setup_store(use_thread_locks=use_thread_locks, use_file_locks=use_file_locks)
+            try:
+                for x in func():
+                    yield x
+            finally:
+                teardown_store()
+        return inner
+    return with_store_dec
 
 #
 # Tests
 #
 
-@with_store
+PATH = ['foo', 'bar', '1234ae']
+
+@with_store()
 def test_basic():
     td = store_instance.get(PATH)
     yield eq_, td.is_computed(), False
@@ -101,8 +85,13 @@ def test_basic():
     # Check contents of dir
     yield eq_, os.listdir(os.path.join(*([tempdir] + PATH))), ['output.pkl']
 
+@with_store()
+def test_errors():
+    a = store_instance.get(PATH)
+    yield assert_raises, IllegalOperationError, a.persist_output, (1, 2, 3)
 
-def do_pessimistic_lock_tests():
+
+def do_pessimistic_lock():
     # Simple checks. Must also be stress-tested for race conditions,
     # this is not sufficient.
     a = store_instance.get(PATH)
@@ -119,16 +108,12 @@ def do_pessimistic_lock_tests():
     yield eq_, a.attempt_compute_lock(blocking=False), COMPUTED
     
 
-@with_store
-# Temporarily disable the lockf mechanism, make
-# sure we rely on threading only. Probably not necessarry...
-@with_no_lockf
+@with_store(use_file_locks=False)
 def test_thread_locking_nowait():
-    for x in do_pessimistic_lock_tests():
+    for x in do_pessimistic_lock():
         yield x
 
-@with_store
-@with_no_lockf
+@with_store(use_file_locks=False)
 def test_thread_locking_wait():
     # Test with blocking
     other_beforesleep = threading.Event()
@@ -161,50 +146,15 @@ def test_thread_locking_wait():
     for x in otherthread.tests:
         yield x
 
-@with_store
-def test_fcntl_locking():
-    try:
-        import fcntl
-    except ImportError:
-        raise SkipTest("Currently only on POSIX platforms")
-#    do_pessimistic_lock_tests()
-
-@with_store
+@with_store(use_thread_locks=False, use_file_locks=False)
 def test_optimistic_locking():
-    # Temporarily disable any lockf present
-    old_fcntl_lockf = store.fcntl_lockf
-    try:
-        store.fcntl_lockf = None
-        for x in _do_optimistic_locking(): yield x
-    finally:
-        fcntl_lockf = old_fcntl_lockf
-
-def _do_optimistic_locking():
-    # Simulate concurrent access by doing a nested call from
-    # within the callback -- the store can't tell the difference
-    nested_checks = []
-
-    def do_fail():
-        nested_checks.append((ok_, False, "Should not try to recompute"))
-
-    def compute_inner():
-        # Actually return something different for the same hash (!!)
-        return ("compute_inner",)
-
-    def compute_outer():
-        # The store thinks we're busy computing -- now,
-        # hit it again for the same resource.
-        r = store_instance.fetch_or_compute_output(NAMELST, HASH, compute_inner)
-        nested_checks.append((eq_, r, ("compute_inner",)))
-        return ("compute_outer",)
-
-    r = store_instance.fetch_or_compute_output(NAMELST, HASH, compute_outer)
-    # At this point, the return value of compute_outer is passed through.
-    yield eq_, r, ("compute_outer",)    
-
-    # ...BUT, what is actually persisted is the result of
-    # compute_inner which got there first.
-    r = store_instance.fetch_or_compute_output(NAMELST, HASH, do_fail)
-    yield eq_, r, ("computer_inner",)
-
-    for x in nested_checks: yield x    
+    a = store_instance.get(PATH)
+    b = store_instance.get(PATH)
+    eq_(a.attempt_compute_lock(blocking=False), MUST_COMPUTE)
+    eq_(b.attempt_compute_lock(blocking=False), MUST_COMPUTE)
+    a.persist_output((1, 2, 3))
+    b.persist_output((4, 5, 6))
+    yield eq_, b.commit(), True
+    yield eq_, a.commit(), False
+    yield eq_, a.fetch_output(), (4, 5, 6)
+    yield eq_, b.fetch_output(), (4, 5, 6)
