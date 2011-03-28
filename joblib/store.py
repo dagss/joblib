@@ -5,23 +5,49 @@
 """
 A default file-based data store for Memory.
 
+Design
+------
+
+The DirectoryStore is reentrant and very simple (multiple threads or
+processes can use the same instance). The get() method returns a
+TaskData instance, which should not be shared across threads or
+processes. Example usage::
+
+    mystore = DirectoryStore('/tmp/joblib')
+    res = mystore.get(['mymod', 'myfunc', 'a3242bdef323423'])
+    # Now, *always* call attempt_compute_lock() or is_computed() first
+    status = res.attempt_compute_lock(blocking=False)
+    # status can now be MUST_COMPUTE, COMPUTED or WAIT. Assume MUST_COMPUTE:
+    res.persist_input({'a' : 1})
+    res.persist_output((1, 2, 3))
+    res.commit()
+    res.close() # put this in a finally block!!
+
+
 Locking
 -------
 
-Two forms of locking are both used:
+Three forms of locking are used. The two first are pessimistic locks;
+they are present so that processes/threads can go do something else
+(or go to sleep) if somebody else is already working on the same
+task. Even if these two mechanisms both fail, it will simply mean more
+CPU time wasted, because the last mechanism will ensure correctness.
 
- - Pessimistic: On Unix platforms, fcntl locking will be used, which
-   supports [...]
+ - Thread locking: Largely because Unix doesn't support file locking
+   in-process, the first lock mechanism used is in-process thread
+   locks.  The global thread lock is very transitory and should not be
+   a problem, considering the GIL. All waiting happen per-task.
 
- - Optimistic: Even if the pessimistic locking [...]
+ - File locking: On Unix platforms, fcntl.lockf will be used, which
+   has support on single-node as well as on some network
+   filesystems. Importantly, it is safe against dead-locks. Windows
+   locking is still unimplemented.
 
-
-File layout
------------
-
-Each computable result is stored in $STOREDIR/$functionname/$hash
-
- 
+ - Optimistic: All output is generated to a temporary directory, and
+   on commit() the temporary directory is renamed (which is an atomic
+   operation on OSes I checked). If such a rename fails, it will be
+   assumed it is due to a race condition and the computed results
+   are simply dropped. 
 
 """
 
