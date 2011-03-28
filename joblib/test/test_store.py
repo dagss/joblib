@@ -58,6 +58,11 @@ def with_store(use_thread_locks=True, use_file_locks=True):
         return inner
     return with_store_dec
 
+def ls(path):
+    l = os.listdir(path)
+    l.sort()
+    return l
+
 #
 # Tests
 #
@@ -75,6 +80,7 @@ def test_basic():
     yield eq_, td.is_computed(), False
     yield eq_, td.attempt_compute_lock(blocking=False), MUST_COMPUTE
     td.persist_output((1, 2, 3))
+    td.persist_input({'a': 34})
     td.commit()
     yield eq_, td.attempt_compute_lock(blocking=False), COMPUTED    
     yield eq_, td.is_computed(), True
@@ -89,7 +95,7 @@ def test_basic():
     td.close()
 
     # Check contents of dir
-    yield eq_, os.listdir(os.path.join(*([tempdir] + PATH))), ['output.pkl']
+    yield eq_, ls(os.path.join(*([tempdir] + PATH))), ['input_args.json', 'output.pkl']
 
 @with_store()
 def test_errors():

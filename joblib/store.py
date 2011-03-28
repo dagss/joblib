@@ -51,6 +51,15 @@ except ImportError:
 from contextlib import contextmanager
 import tempfile
 import threading
+try:
+    # json is in the standard library for Python >= 2.6
+    import json
+except ImportError:
+    try:
+        import simplejson as json
+    except ImportError:
+        # Not the end of the world: we'll do without this functionality
+        json = None
 
 
 # Relative imports
@@ -124,10 +133,12 @@ class TaskData(object):
         if self._status == CLOSED:
             raise IllegalOperationError('Resources is closed')
 
-    def persist_input(self, args, kw):
+    def persist_input(self, input_repr):
         if self._work_path is None:
             raise IllegalOperationError("call attemt_compute_lock first")
-        raise NotImplementedError()
+        if json is not None:
+            with file(os.path.join(self._work_path, 'input_args.json'), 'w') as f:
+                json.dump(input_repr, f)
 
     def persist_output(self, output):
         if self._work_path is None:
