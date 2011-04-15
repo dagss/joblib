@@ -90,6 +90,7 @@ except ImportError:
 
 # Relative imports
 from . import numpy_pickle
+from .func_inspect import get_func_name
 
 # Process invariants
 hostname = gethostname()
@@ -123,30 +124,84 @@ class DirectoryStore(object):
                  use_thread_locks=True,
                  use_file_locks=True):
         self.store_path = os.path.abspath(path)
+        self.work_root = os.path.join(self.store_path, '_work')
         self.save_npy = save_npy
         self.mmap_mode = mmap_mode
         self._use_thread_locks = use_thread_locks
         self._use_file_locks = use_file_locks
 
+    def _get_func_path(self, func):
+        module, name = get_func_name(func)
+        module.append(name)
+        return module
+
+    def get_func_dir(self, func, mkdir=True):
+        """
+        Returns a directory that can be used for storing auxiliary
+        information about a function. That is, a mapping from
+        a callable function to a directory on disk.
+
+        Currently it will be the one containing all the task data for
+        the function, but this is not guaranteed.
+
+        Access to this directory is obviously not locked etc.; use
+        with care.
+        """
+        func_dir = os.path.join(self.store_path, *self._get_func_path(func))
+        if mkdir and not os.path.exists(func_dir):
+            ensure_dir(func_dir)
+        return func_dir        
+
+    def get_task_store(self, func, input_hash):
+        """Retyrb a handle to a task store.
+        
+        Returns the store for the given task, identified by a
+        function/callbable object and a hash of the input arguments.
+
+        Returns a TaskData instance. This method is reentrant,
+        while the returned instance has no-reentrant methods
+        and is stateful.
+        """
+        return self.get(self._get_func_path(func) + [input_hash])
+
     def get(self, path):
+        """Low-level function to return a store handle given abstract path.
+        
+        Returns a TaskData instance. This method is reentrant,
+        while the returned instance has no-reentrant methods
+        and is stateful.
+        """
         if not isinstance(path, list):
             raise TypeError("path must be a list of strings")
         return TaskData(os.path.join(*([self.store_path] + path)),
+                        self.work_root,
                         self.save_npy,
                         self.mmap_mode,
                         self._use_thread_locks,
                         self._use_file_locks
                         )
+    
+    def clear(self, func, warn=True):
+        """ Delete all computed results for the given function.
+
+        This will remove any already computed results.
+        """
+        func_dir = self.get_func_dir(func, mkdir=False)
+        if warn: # TODO: Fix with proper logging framework
+            self.warn("Clearing cache %s" % func_dir)
+        if os.path.exists(func_dir):
+            shutil.rmtree(func_dir, ignore_errors=True)
 
 class TaskData(object):
     """
     *always* call close on one of these
     """
-    def __init__(self, task_path, save_npy, mmap_mode,
+    def __init__(self, task_path, work_root, save_npy, mmap_mode,
                  use_thread_locks=True, use_file_locks=True):
         self.task_path = os.path.realpath(task_path)
         self.save_npy = save_npy
         self.mmap_mode = mmap_mode
+        self.work_root = work_root
         self._lockfilename = '%s.lock' % self.task_path
         self._lockfile = None
         self._work_path = None
@@ -190,6 +245,18 @@ class TaskData(object):
     def is_computed(self):
         return os.path.exists(self.task_path)
 
+    def unsafe_clear(self):
+        """ Remove the stored data this handle points to. No
+        attempt has been made to make this race-safe.
+        
+        TODO: Change things so that attempt_compute_lock actually
+        loads results, so that we can make a safe clear().
+
+        And idea BTW is to first atomically move the directory to the
+        work dir, before the contents is removed. But more is needed.
+        """
+        shutil.rmtree(self.task_path, ignore_errors=True)
+
     def attempt_compute_lock(self, blocking=True):
         """
         Call this to simultaneously probe whether a task is computed
@@ -204,17 +271,8 @@ class TaskData(object):
         if self.is_computed():
             return COMPUTED
 
-        # Nope. At this point we may be first, so ensure parent
-        # directory exists.
         parent_path, dirname = os.path.split(self.task_path)
-        try:
-            os.makedirs(parent_path)
-        except OSError:
-            if os.path.exists(parent_path):
-                pass
-            else:
-                raise
-
+        ensure_dir(parent_path)
         self._lockfile = None
         self._work_path = None
         try:
@@ -271,9 +329,11 @@ class TaskData(object):
             # (this includes the case where fcntl_lockf is not None but is
             # broken!). Either way we proceed with computation;
             # commit() may then discover there was concurrent computation anyway.
+
+            ensure_dir(self.work_root)
             self._work_path = tempfile.mkdtemp(prefix='%s-%d-%s-' %
                                                (hostname, pid, dirname),
-                                               dir=parent_path)
+                                               dir=self.work_root)
             return MUST_COMPUTE
         except:
             self.rollback()
@@ -335,3 +395,18 @@ class TaskData(object):
     def close(self):
         self.rollback()
         self.task_path = None
+
+def ensure_dir(path):
+    """ Ensure that a directory exists with graceful race handling
+
+    An exception is not raised if two processes attempt to create
+    the directory at the same time; but still raised in other
+    circumstances.
+    """
+    try:
+        os.makedirs(path)
+    except OSError:
+        if os.path.exists(path):
+            pass # race condition
+        else:
+            raise # something else

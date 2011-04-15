@@ -38,6 +38,7 @@ from .func_inspect import get_func_code, get_func_name, filter_args
 from .logger import Logger, format_time
 from . import numpy_pickle
 from .disk import rm_subdirs
+from .store import DirectoryStore, COMPUTED, MUST_COMPUTE, WAIT
 
 FIRST_LINE_TEXT = "# first line:"
 
@@ -107,15 +108,17 @@ class MemorizedFunc(Logger):
     # Public interface
     #-------------------------------------------------------------------------
    
-    def __init__(self, func, cachedir, ignore=None, save_npy=True, 
-                             mmap_mode=None, verbose=1, timestamp=None):
+    def __init__(self, func, cachedir=None, ignore=None, save_npy=True, 
+                             mmap_mode=None, verbose=1, timestamp=None,
+                             store=None):
         """
             Parameters
             ----------
             func: callable
                 The function to decorate
             cachedir: string
-                The path of the base directory to use as a data store
+                The path of the base directory to use as a data store.
+                Should be None if and only if ``store`` is provided.
             ignore: list or None
                 List of variable names to ignore.
             save_npy: boolean, optional
@@ -132,12 +135,23 @@ class MemorizedFunc(Logger):
             timestamp: float, optional
                 The reference time from which times in tracing messages
                 are reported.
+            store: object
+                Object fullfilling the store API. By default, a
+                ``joblib.store.DirectoryStore`` is created with the
+                parameters given.
         """
         Logger.__init__(self)
         self._verbose = verbose
-        self.cachedir = cachedir
         self.func = func
-        self.save_npy = save_npy
+        if store is None:
+            store = DirectoryStore(cachedir, save_npy, mmap_mode,
+                                   use_thread_locks=True, use_file_locks=True)
+        else:
+            if not (cachedir is save_npy is None):
+                raise TypeError('Either provide store instance or DirectoryStore arguments')
+            if mmap_mode != store.mmap_mode:
+                raise ValueError('store has mismatching mmap_mode')
+        self.store = store
         self.mmap_mode = mmap_mode
         if timestamp is None:
             timestamp = time.time()
@@ -145,8 +159,6 @@ class MemorizedFunc(Logger):
         if ignore is None:
             ignore = []
         self.ignore = ignore
-        if not os.path.exists(self.cachedir):
-            os.makedirs(self.cachedir)
         try:
             functools.update_wrapper(self, func)
         except:
@@ -159,72 +171,82 @@ class MemorizedFunc(Logger):
             doc = func.__doc__
         self.__doc__ = 'Memoized version of %s' % doc
 
-
     def __call__(self, *args, **kwargs):
         # Compare the function code with the previous to see if the
-        # function code has changed
-        output_dir, _ = self.get_output_dir(*args, **kwargs)
-        # FIXME: The statements below should be try/excepted
-        if not (self._check_previous_func_code(stacklevel=3) and 
-                                 os.path.exists(output_dir)):
-            return self.call(*args, **kwargs)
-        else:
-            try:
-                return self.load_output(output_dir)
-            except Exception:
-                # XXX: Should use an exception logger
-                self.warn(
-                'Exception while loading results for '
-                '(args=%s, kwargs=%s)\n %s' %
-                    (args, kwargs, traceback.format_exc())
-                    )
-
-                shutil.rmtree(output_dir, ignore_errors=True)
-                return self.call(*args, **kwargs)
+        # function code has changed. This calls self.clear() if
+        # needed.
+        self._check_previous_func_code(stacklevel=3)
+        taskdata = self._new_task_store_handle(*args, **kwargs)
+        try:
+            state = taskdata.attempt_compute_lock(blocking=True)
+            if state == MUST_COMPUTE:
+                output = self._compute(taskdata, args, kwargs)
+                taskdata.commit()
+            else:
+                assert state == COMPUTED
+                try:
+                    output = taskdata.fetch_output()
+                except Exception:
+                    # XXX: Should use an exception logger
+                    self.warn(
+                        'Exception while loading results for '
+                        '(args=%s, kwargs=%s)\n %s' %
+                        (args, kwargs, traceback.format_exc()))
+                    taskdata.unsafe_clear()
+                    # Now, we compute no matter what, and attempt to lock and
+                    # store only afterwards (note the non-blocking lock)
+                    output = self.func(*args, **kwargs)
+                    state = taskdata.attempt_compute_lock(blocking=False)
+                    if state == MUST_COMPUTE:
+                        taskdata.persist_output(output)
+                        self._persist_input(taskdata, args, kwargs)
+                        taskdata.commit()
+        finally:
+            taskdata.close()
+        return output
 
     #-------------------------------------------------------------------------
     # Private interface
     #-------------------------------------------------------------------------
-   
-    def _get_func_dir(self, mkdir=True):
-        """ Get the directory corresponding to the cache for the
-            function.
-        """
-        module, name = get_func_name(self.func)
-        module.append(name)
-        func_dir = os.path.join(self.cachedir, *module)
-        if mkdir and not os.path.exists(func_dir):
-            try:
-                os.makedirs(func_dir)
-            except OSError:
-                """ Dir exists: we have a race condition here, when using 
-                    multiprocessing.
-                """
-                # XXX: Ugly
-        return func_dir
+    def _new_task_store_handle(self, *args, **kwargs):
+        # NOTE: Returned TaskData must be close()-ed!
+        return self.store.get_task_store(self.func,
+                                         self._get_input_hash(*args, **kwargs))
 
+    def _persist_input(self, taskdata, args_tuple, kwargs_dict):
+        argument_dict = filter_args(self.func, self.ignore,
+                                    *args_tuple, **kwargs_dict)
+        input_repr = dict((k, repr(v)) for k, v in argument_dict.iteritems())
+        taskdata.persist_input(input_repr)
 
-    def get_output_dir(self, *args, **kwargs):
-        """ Returns the directory in which are persisted the results
-            of the function corresponding to the given arguments.
+    def _compute(self, taskdata, args_tuple, kwargs_dict):
+        start_time = time.time()
+        if self._verbose:
+            print self.format_call(*args_tuple, **kwargs_dict)
+        output = self.func(*args_tuple, **kwargs_dict)
+        taskdata.persist_output(output)
+        self._persist_input(taskdata, args_tuple, kwargs_dict)
+        duration = time.time() - start_time
+        if self._verbose:
+            _, name = get_func_name(self.func)
+            msg = '%s - %s' % (name, format_time(duration))
+            print max(0, (80 - len(msg)))*'_' + msg
+        return output
 
-            The results can be loaded using the .load_output method.
+    def _get_input_hash(self, *args, **kwargs):
+        """ Hashes arguments.
         """
         coerce_mmap = (self.mmap_mode is not None)
         argument_hash = hash(filter_args(self.func, self.ignore,
                              *args, **kwargs), 
                              coerce_mmap=coerce_mmap)
-        output_dir = os.path.join(self._get_func_dir(self.func),
-                                    argument_hash)
-        return output_dir, argument_hash
-        
+        return argument_hash
 
     def _write_func_code(self, filename, func_code, first_line):
         """ Write the function code and the filename to a file.
         """
         func_code = '%s %i\n%s' % (FIRST_LINE_TEXT, first_line, func_code)
         file(filename, 'w').write(func_code)
-
 
     def _check_previous_func_code(self, stacklevel=2):
         """ 
@@ -235,7 +257,7 @@ class MemorizedFunc(Logger):
         # changing code and collision. We cannot inspect.getsource
         # because it is not reliable when using IPython's magic "%run".
         func_code, source_file, first_line = get_func_code(self.func)
-        func_dir = self._get_func_dir()
+        func_dir = self.store.get_func_dir(self.func)
         func_code_file = os.path.join(func_dir, 'func_code.py')
 
         try:
@@ -294,36 +316,23 @@ class MemorizedFunc(Logger):
     def clear(self, warn=True):
         """ Empty the function's cache. 
         """
-        func_dir = self._get_func_dir(mkdir=False)
-        if self._verbose and warn:
-            self.warn("Clearing cache %s" % func_dir)
-        if os.path.exists(func_dir):
-            shutil.rmtree(func_dir, ignore_errors=True)
-        os.makedirs(func_dir)
+        self.store.clear(self.func, warn=warn and self._verbose)
+        func_dir = self.store.get_func_dir(self.func)
         func_code, _, first_line = get_func_code(self.func)
         func_code_file = os.path.join(func_dir, 'func_code.py')
         self._write_func_code(func_code_file, func_code, first_line)
-
 
     def call(self, *args, **kwargs):
         """ Force the execution of the function with the given arguments and 
             persist the output values.
         """
-        start_time = time.time()
-        if self._verbose:
-            print self.format_call(*args, **kwargs)
-        output_dir, argument_hash = self.get_output_dir(*args, **kwargs)
-        output = self.func(*args, **kwargs)
-        self._persist_output(output, output_dir)
-        input_repr = self._persist_input(output_dir, *args, **kwargs)
-        duration = time.time() - start_time
-        if self._verbose:
-            _, name = get_func_name(self.func)
-            msg = '%s - %s' % (name, format_time(duration))
-            print max(0, (80 - len(msg)))*'_' + msg
-        return output
-
-
+        taskdata = self._new_task_store_handle(*args, **kwargs)
+        try:
+            taskdata.unsafe_clear()
+        finally:
+            taskdata.close()        
+        return self(*args, **kwargs)
+    
     def format_call(self, *args, **kwds):
         """ Returns a nicely formatted statement displaying the function 
             call with the given arguments.
@@ -364,46 +373,6 @@ class MemorizedFunc(Logger):
 
     # Make make public
 
-    def _persist_output(self, output, dir):
-        """ Persist the given output tuple in the directory.
-        """
-        try:
-            if not os.path.exists(dir):
-                os.makedirs(dir)
-            filename = os.path.join(dir, 'output.pkl')
-
-            if 'numpy' in sys.modules and self.save_npy:
-                numpy_pickle.dump(output, filename) 
-            else:
-                output_file = file(filename, 'w')
-                pickle.dump(output, output_file, protocol=2)
-                output_file.close()
-        except OSError:
-            " Race condition in the creation of the directory "
-
-
-    def _persist_input(self, output_dir, *args, **kwargs):
-        """ Save a small summary of the call using json format in the
-            output directory.
-        """
-        argument_dict = filter_args(self.func, self.ignore,
-                                    *args, **kwargs)
-
-        input_repr = dict((k, repr(v)) for k, v in argument_dict.iteritems())
-        if json is not None:
-            # This can fail do to race-conditions with multiple
-            # concurrent joblibs removing the file or the directory
-            try:
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
-                json.dump(
-                    input_repr,
-                    file(os.path.join(output_dir, 'input_args.json'), 'w'),
-                    )
-            except:
-                pass
-        return input_repr
-
     def load_output(self, output_dir):
         """ Read the results of a previous calculation from the directory
             it was cached in.
@@ -432,7 +401,7 @@ class MemorizedFunc(Logger):
         return '%s(func=%s, cachedir=%s)' % (
                     self.__class__.__name__,
                     self.func,
-                    repr(self.cachedir),
+                    repr(self.store.get_func_dir(self.func, mkdir=False)),
                     )
 
 

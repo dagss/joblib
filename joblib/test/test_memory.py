@@ -364,7 +364,7 @@ def test_func_dir():
 
     g = memory.cache(f)
     # Test that the function directory is created on demand
-    yield nose.tools.assert_equal, g._get_func_dir(), path
+    yield nose.tools.assert_equal, g.store.get_func_dir(g.func), path
     yield nose.tools.assert_true, os.path.exists(path)
 
     # Test that the code is stored.
@@ -376,13 +376,15 @@ def test_func_dir():
         g._check_previous_func_code()
 
     # Test the robustness to failure of loading previous results.
-    dir, _ = g.get_output_dir(1)
+    x = g._new_task_store_handle(1)
+    try:
+        dir = x.task_path
+    finally:
+        x.close()
     a = g(1)
     yield nose.tools.assert_true, os.path.exists(dir)
     os.remove(os.path.join(dir, 'output.pkl'))
     yield nose.tools.assert_equal, a, g(1)
-
-
 
 def test_persistence():
     """ Test the memorized functions can be pickled and restored.
@@ -393,9 +395,37 @@ def test_persistence():
 
     h = pickle.loads(pickle.dumps(g))
 
-    output_dir, _ = g.get_output_dir(1)
-    yield nose.tools.assert_equal, output, h.load_output(output_dir)
+    x = g._new_task_store_handle(1)
+    y = h._new_task_store_handle(1)
+    try:
+        yield nose.tools.assert_equal, x.task_path, y.task_path
+        yield (nose.tools.assert_equal,
+               x.fetch_output(),
+               y.fetch_output())
+    finally:
+        x.close()
+        y.close()
 
+_counter = 0
+def f_side_effects(x):
+    global _counter
+    _counter += 1
+    return 2 * x
+
+def test_call():
+    """ Test that the call() method forces a call.
+    """
+    global _counter
+    memory = Memory(cachedir=env['dir'], verbose=0)
+    gse = memory.cache(f_side_effects)
+    _counter = 0
+    yield nose.tools.assert_equal, 4, gse(2)
+    yield nose.tools.assert_equal, _counter, 1
+    yield nose.tools.assert_equal, 4, gse(2)
+    yield nose.tools.assert_equal, _counter, 1
+    yield nose.tools.assert_equal, 4, gse.call(2)
+    yield nose.tools.assert_equal, _counter, 2
+    
 
 def test_format_signature():
     """ Test the signature formatting.
