@@ -119,7 +119,7 @@ class DirectoryStore(object):
     def __init__(self,
                  path,
                  save_npy=True, 
-                 mmap_mode=None
+                 mmap_mode=None,
                  use_thread_locks=True,
                  use_file_locks=True):
         self.store_path = os.path.abspath(path)
