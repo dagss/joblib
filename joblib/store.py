@@ -96,12 +96,18 @@ from .func_inspect import get_func_name
 hostname = gethostname()
 pid = os.getpid()
 
-# Enums. Feature is simply that they compare by id()
+# Enums.
 class Enum(object):
     def __init__(self, name):
         self.name = name
     def __repr__(self):
         return '<%s>' % self.name
+    def __eq__(self, other):
+        return self.name == other.name
+    def __ne__(self, other):
+        return not self == other
+    def __hash__(self):
+        return hash(self.name)
     
 COMPUTED = Enum('COMPUTED')
 MUST_COMPUTE = Enum('MUST_COMPUTE')
