@@ -5,9 +5,9 @@ Futures-style executor targeted for clusters
 import os
 from concurrent.futures import Executor
 
-from joblib.func_inspect import filter_args
-from joblib.hashing import hash
-from joblib import numpy_pickle
+from ..func_inspect import filter_args
+from ..hashing import hash
+from .. import numpy_pickle
 
 __all__ = ['ClusterExecutor', 'SlurmExecutor']
 
