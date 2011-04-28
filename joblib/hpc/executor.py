@@ -3,6 +3,7 @@ Futures-style executor targeted for clusters
 """
 
 import os
+import sys
 import socket
 import errno
 import shutil
@@ -76,7 +77,7 @@ class DirectoryExecutor(ClusterExecutor):
     default_store_path = (os.environ['JOBSTORE']
                           if 'JOBSTORE' in os.environ
                           else None)
-    default_poll_interval = 60
+    default_poll_interval = 5
 
     def _encode_digest(self, digest):
         # Use base64 but ensure there's no padding (pad digest up front).
@@ -156,8 +157,8 @@ def execute_directory_job(path):
     func, args, kwargs = [input[x] for x in ['func', 'args', 'kwargs']]
     try:
         output = ('finished', func(*args, **kwargs))
-    except BaseException, e:
-        output = ('exception', e)
+    except BaseException:
+        output = ('exception', sys.exc_info()[1])
     # Do an atomic pickle; if output.pkl is present then it is complete
     fd, workfile = tempfile.mkstemp(prefix='output.pkl-', dir=path)
     try:
@@ -199,9 +200,8 @@ class DirectoryFuture(ClusterFuture):
     
     def result(self, timeout=None):
         sleeptime = self._executor.poll_interval
-        if timeout is None:
+        if timeout is not None:
             sleeptime = min(sleeptime, timeout)
-        else:
             endtime = time.time() + timeout            
         while True:
             if self._finished():
