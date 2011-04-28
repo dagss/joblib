@@ -1,10 +1,11 @@
-from joblib.hpc import SlurmExecutor, versioned
+from joblib.hpc import versioned
+from joblib.hpc.executor import TitanOsloExecutor, SlurmExecutor
 
-@versioned(ignore_deps=True)
-def func(x, y):
-    return x**2 + y
+from joblib.hpc.test.funcs import func1
 
-e = SlurmExecutor(account='quiet')
+e = TitanOsloExecutor(account='quiet')
 
-fut = e.submit(func, 2, 3)
+fut = e.submit(func1, 2, 3)
 print fut
+fut.submit()
+
