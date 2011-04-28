@@ -71,6 +71,12 @@ class DirectoryExecutor(ClusterExecutor):
     configuration_keys = ClusterExecutor.configuration_keys + (
         'store_path',)
     default_store_path = os.path.realpath(os.environ.get('JOBSTORE', None))
+    def _encode_digest(self, digest):
+        # Use base64 but ensure there's no padding (pad digest up front).
+        # Replace / with _ in alphabet.
+        while (len(digest) * 8 % 6) != 0:
+            digest += '\0'
+        return base64.b64encode(digest, '_+')
 
     def _create_future(self, func, args, kwargs, filtered_args_dict):
         if not func.version_info['ignore_deps']:
@@ -83,9 +89,9 @@ class DirectoryExecutor(ClusterExecutor):
         # Make job_path containing hashes
         h = NumpyHasher('sha1')
         h.hash(filtered_args_dict)
-        args_hash = base64.b32encode(h._hash.digest()).lower()
+        args_hash = self._encode_digest(h._hash.digest())
         func_hash = '%s-%s' % (func.__name__,
-                               base64.b32encode(func.version_info['digest']).lower())
+                               self._encode_digest(func.version_info['digest']))
         job_name = os.path.join(func_hash, args_hash)
         # Construct job dir if not existing. Remember that we may
         # race for this; if we got to create the directory, we have
