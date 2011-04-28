@@ -1,5 +1,5 @@
 from joblib.hpc import versioned
-from joblib.hpc.executor import TitanOsloExecutor, SlurmExecutor
+from joblib.hpc.clusters.titan_oslo import TitanOsloExecutor
 from joblib.hpc.test.funcs import func1, funcex
 import logging
 logging.basicConfig()
@@ -13,3 +13,5 @@ fut2 = e.submit(funcex, 2, 3)
 print fut1.result()
 print type(fut2.exception(100))
 print fut2.result(100)
+
+# TODO check function hash

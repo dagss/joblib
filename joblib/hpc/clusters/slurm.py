@@ -1,28 +1,110 @@
-from concurrent.futures import Executor
+import os
+from textwrap import dedent
+from os.path import join as pjoin
 
-class SlurmExecutor(Executor):
-    """
-    Configured for a cluster/location through subclassing,
-    configured for individual uses through constructor arguments.
-    """
-    setting_keys = ('account', 'nodes', 'mem_per_cpu', 'time',
-                    'tmp', 'ntasks_per_node', 'omp_num_threads')
-
+from .. import DirectoryExecutor, DirectoryFuture
+        
+class SlurmExecutor(DirectoryExecutor):
+    configuration_keys = DirectoryExecutor.configuration_keys + (
+        'account', 'nodes', 'mem_per_cpu', 'time',
+        'tmp', 'ntasks_per_node', 'omp_num_threads',
+        'sbatch_command_pattern')
     default_nodes = 1
     default_mem_per_cpu = '2000M'
     default_time = '01:00:00' # max run time
     default_tmp = '100M' # scratch space
     default_omp_num_threads = '$SLURM_NTASKS_PER_NODE'
-    
-    def __init__(self, **kw):
-        for key in setting_keys:
-            value = kw.get(key, None)
-            if value is None:
-                value = getattr(self.__class__, 'default_%s' % key, None)
-            if value is None:
-                raise TypeError('Argument %s not provided' % key)
-            setattr(self, key, value)
+    default_ntasks_per_node = 1
 
+    # Configurable by base classes for specific clusters
+    pre_command = ''
+    post_command = ''
+    python_command = 'python'
+
+    def _slurm(self, scriptfile):
+        cmd = "sbatch '%s'" % scriptfile
+        if os.system(cmd) != 0:
+            raise RuntimeError('command failed: %s' % cmd)
     
-    def submit(self, func, *args, **kwargs):
+    def get_launch_command(self, fullpath):
+        return dedent("""\
+        {python} <<END
+        from joblib.hpc.executor import execute_directory_job
+        execute_directory_job(\"{fullpath}\")
+        END
+        """.format(python=self.python_command,
+                   fullpath=fullpath))
+
+    def _create_jobscript(self, human_name, job_name, work_path):
+        jobscriptpath = pjoin(work_path, 'sbatchscript')
+        script = make_slurm_script(
+            jobname=human_name,
+            command=self.get_launch_command(pjoin(self.store_path, job_name)),
+            logfile=pjoin(self.store_path, job_name, 'log'),
+            precmd=self.pre_command,
+            postcmd=self.post_command,
+            queue=self.account,
+            ntasks=self.ntasks_per_node,
+            nodes=self.nodes,
+            openmp=self.omp_num_threads,
+            time=self.time)
+        with file(jobscriptpath, 'w') as f:
+            f.write(script)
+
+    def _create_future_from_job_dir(self, job_path):
+        return SlurmFuture(self, job_path)
         
+class SlurmFuture(DirectoryFuture):
+    def submit(self):
+        scriptfile = pjoin(self.job_path, 'sbatchscript')
+        jobid = self._executor._slurm(scriptfile)
+        with file(pjoin(self.job_path, 'jobid'), 'w') as f:
+            f.write(jobid + '\n')
+        with file(pjoin(self.job_path, 'log'), 'w') as f:
+            f.write('%s submitted job (%s), waiting to start\n' %
+                    (strftime('%Y-%m-%d %H:%M:%S'), jobid))
+        return jobid
+        
+def make_slurm_script(jobname, command, logfile, where=None, ntasks=1, nodes=None,
+                      openmp=1, time='24:00:00', constraints=(),
+                      queue='astro', precmd='', postcmd='',
+                      mpi=None):
+    settings = []
+    for c in constraints:
+        settings.append('--constraint=%s' % c)
+    if nodes is not None:
+        if ntasks % nodes != 0:
+            raise ValueError('ntasks=%d not divisible by nnodes=%d' % (ntasks, nodes))
+        settings.append('--ntasks-per-node=%d' % (ntasks // nodes))
+        settings.append('--nodes=%d' % nodes)
+        if mpi is None:
+            mpi = True
+    else:
+        settings.append('--ntasks=%d' % ntasks)
+        if mpi is None:
+            mpi = ntasks > 1
+    lst = '\n'.join(['#SBATCH %s' % x for x in settings])
+    if where is None:
+        where = '$HOME'
+    mpicmd = 'mpirun ' if mpi else ''
+    
+    template = dedent("""\
+        #!/bin/bash
+        #SBATCH --job-name={jobname}
+        #SBATCH --account={queue}
+        #SBATCH --time={time}
+        #SBATCH --mem-per-cpu=2000
+        #SBATCH --tmp=100M
+        #SBATCH --output={logfile}
+        {lst}
+        
+        source /site/bin/jobsetup
+        export OMP_NUM_THREADS={openmp}
+        source $HOME/masterenv
+
+        cd {where}
+        {precmd}
+        {mpicmd}{command}
+        {postcmd}
+        """)
+    return template.format(**locals())

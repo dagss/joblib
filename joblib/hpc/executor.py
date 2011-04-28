@@ -18,7 +18,21 @@ from ..func_inspect import filter_args
 from ..hashing import NumpyHasher
 from .. import numpy_pickle
 
-__all__ = ['ClusterExecutor', 'SlurmExecutor']
+__all__ = ['ClusterFuture', 'ClusterExecutor', 'DirectoryExecutor', 'DirectoryFuture']
+
+# Utils
+class NullLogger(object):
+    def info(self, *args):
+        pass
+    error = debug = warning = info
+null_logger = NullLogger()
+
+def ensuredir(path):
+    try:
+        os.makedirs(path)
+    except OSError, e:
+        if e.errno != errno.EEXIST:
+            raise
 
 # Process invariants
 hostname = socket.gethostname()
@@ -68,12 +82,6 @@ class ClusterExecutor(object):
 
     def _create_future(self, func, args, kwargs, filtered_args_dict, should_submit):
         raise NotImplementedError()
-
-class NullLogger(object):
-    def info(self, *args):
-        pass
-    error = debug = warning = info
-null_logger = NullLogger()
 
 class DirectoryExecutor(ClusterExecutor):
     configuration_keys = ClusterExecutor.configuration_keys + (
@@ -246,144 +254,3 @@ class DirectoryFuture(ClusterFuture):
     def _load_output(self):
         self._executor.logger.debug('Loading job output: %s', self.job_name)
         return numpy_pickle.load(pjoin(self.job_path, 'output.pkl'))
-        
-
-
-class SlurmExecutor(DirectoryExecutor):
-    configuration_keys = DirectoryExecutor.configuration_keys + (
-        'account', 'nodes', 'mem_per_cpu', 'time',
-        'tmp', 'ntasks_per_node', 'omp_num_threads',
-        'sbatch_command_pattern')
-    default_nodes = 1
-    default_mem_per_cpu = '2000M'
-    default_time = '01:00:00' # max run time
-    default_tmp = '100M' # scratch space
-    default_omp_num_threads = '$SLURM_NTASKS_PER_NODE'
-    default_ntasks_per_node = 1
-
-    # Configurable by base classes for specific clusters
-    pre_command = ''
-    post_command = ''
-    python_command = 'python'
-
-    def _slurm(self, scriptfile):
-        cmd = "sbatch '%s'" % scriptfile
-        if os.system(cmd) != 0:
-            raise RuntimeError('command failed: %s' % cmd)
-    
-    def get_launch_command(self, fullpath):
-        return dedent("""\
-        {python} <<END
-        from joblib.hpc.executor import execute_directory_job
-        execute_directory_job(\"{fullpath}\")
-        END
-        """.format(python=self.python_command,
-                   fullpath=fullpath))
-
-    def _create_jobscript(self, human_name, job_name, work_path):
-        jobscriptpath = pjoin(work_path, 'sbatchscript')
-        script = make_slurm_script(
-            jobname=human_name,
-            command=self.get_launch_command(pjoin(self.store_path, job_name)),
-            logfile=pjoin(self.store_path, job_name, 'log'),
-            precmd=self.pre_command,
-            postcmd=self.post_command,
-            queue=self.account,
-            ntasks=self.ntasks_per_node,
-            nodes=self.nodes,
-            openmp=self.omp_num_threads,
-            time=self.time)
-        with file(jobscriptpath, 'w') as f:
-            f.write(script)
-
-    def _create_future_from_job_dir(self, job_path):
-        return SlurmFuture(self, job_path)
-
-
-import re
-from time import strftime
-
-class TitanOsloExecutor(SlurmExecutor):
-    default_sbatch_command_pattern = 'ssh titan.uio.no "bash -ic \'sbatch %s\'"'
-    _sbatch_re = re.compile(r'Submitted batch job ([0-9]+)')
-
-    def _slurm(self, scriptfile):
-        from subprocess import Popen, PIPE
-        pp = Popen(['ssh', '-T', 'titan.uio.no'], stdin=PIPE, stderr=PIPE, stdout=PIPE)
-        pp.stdin.write("sbatch '%s'" % scriptfile)
-        pp.stdin.close()
-        #TODO: Could this deadlock when output is larger than buffer size?
-        err = pp.stderr.read()
-        out = pp.stdout.read()
-        pp.stderr.close()
-        pp.stdout.close()
-        retcode = pp.wait()
-        if retcode != 0:
-            raise RuntimeError('Return code %d: %s\nError log:\n%s' % (retcode, ' '.join(cmd),
-                                                                       err))
-        m = self._sbatch_re.search(out)
-        if not m:
-            raise RuntimeError('Sbatch provided unexpected output: %s' % out)
-        return m.group(1)
-        
-class SlurmFuture(DirectoryFuture):
-    def submit(self):
-        scriptfile = pjoin(self.job_path, 'sbatchscript')
-        jobid = self._executor._slurm(scriptfile)
-        with file(pjoin(self.job_path, 'jobid'), 'w') as f:
-            f.write(jobid + '\n')
-        with file(pjoin(self.job_path, 'log'), 'w') as f:
-            f.write('%s submitted job (%s), waiting to start\n' %
-                    (strftime('%Y-%m-%d %H:%M:%S'), jobid))
-        return jobid
-        
-def make_slurm_script(jobname, command, logfile, where=None, ntasks=1, nodes=None,
-                      openmp=1, time='24:00:00', constraints=(),
-                      queue='astro', precmd='', postcmd='',
-                      mpi=None):
-    settings = []
-    for c in constraints:
-        settings.append('--constraint=%s' % c)
-    if nodes is not None:
-        if ntasks % nodes != 0:
-            raise ValueError('ntasks=%d not divisible by nnodes=%d' % (ntasks, nodes))
-        settings.append('--ntasks-per-node=%d' % (ntasks // nodes))
-        settings.append('--nodes=%d' % nodes)
-        if mpi is None:
-            mpi = True
-    else:
-        settings.append('--ntasks=%d' % ntasks)
-        if mpi is None:
-            mpi = ntasks > 1
-    lst = '\n'.join(['#SBATCH %s' % x for x in settings])
-    if where is None:
-        where = '$HOME'
-    mpicmd = 'mpirun ' if mpi else ''
-    
-    template = dedent("""\
-        #!/bin/bash
-        #SBATCH --job-name={jobname}
-        #SBATCH --account={queue}
-        #SBATCH --time={time}
-        #SBATCH --mem-per-cpu=2000
-        #SBATCH --tmp=100M
-        #SBATCH --output={logfile}
-        {lst}
-        
-        source /site/bin/jobsetup
-        export OMP_NUM_THREADS={openmp}
-        source $HOME/masterenv
-
-        cd {where}
-        {precmd}
-        {mpicmd}{command}
-        {postcmd}
-        """)
-    return template.format(**locals())
-
-def ensuredir(path):
-    try:
-        os.makedirs(path)
-    except OSError, e:
-        if e.errno != errno.EEXIST:
-            raise
