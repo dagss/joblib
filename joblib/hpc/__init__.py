@@ -40,6 +40,13 @@ def noeffects():
     return dec
 
 def versioned(version=None, ignore_deps=False, ignore=()):
+    passed_func = None
+    if hasattr(version, '__call__'):
+        # Used as decorator without ()
+        if ignore_deps != False or ignore != ():
+            raise TypeError('Invalid version argument')
+        passed_func = version
+        version = None
     def dec(func):
         # Make hash. The function hash does not consider dependencies.
         h = hashlib.sha1()
@@ -59,4 +66,8 @@ def versioned(version=None, ignore_deps=False, ignore=()):
                                  digest=h.digest(),
                                  hexdigest=h.hexdigest())
         return func
-    return dec
+    if passed_func is None:
+        return dec
+    else:
+        return dec(passed_func)
+
