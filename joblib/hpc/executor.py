@@ -21,9 +21,6 @@ __all__ = ['ClusterExecutor', 'SlurmExecutor']
 hostname = socket.gethostname()
 pid = os.getpid()
 
-def execute_job(path):
-    pass
-
 class ClusterFuture(object):
     """
     Note that we do not currently inherit from Future,
@@ -67,10 +64,14 @@ class ClusterExecutor(object):
         raise NotImplementedError()
 
 
+
 class DirectoryExecutor(ClusterExecutor):
     configuration_keys = ClusterExecutor.configuration_keys + (
         'store_path',)
-    default_store_path = os.path.realpath(os.environ.get('JOBSTORE', None))
+    default_store_path = (os.environ['JOBSTORE']
+                          if 'JOBSTORE' in os.environ
+                          else None)
+
     def _encode_digest(self, digest):
         # Use base64 but ensure there's no padding (pad digest up front).
         # Replace / with _ in alphabet.
@@ -119,7 +120,7 @@ class DirectoryExecutor(ClusterExecutor):
                                     dir=parentpath)
         try:
             # Dump call to file
-            call_info = (func, args, kwargs)
+            call_info = dict(func=func, args=args, kwargs=kwargs)
             numpy_pickle.dump(call_info, os.path.join(workpath, 'input.pkl'))
 
             # Create job script
@@ -141,6 +142,12 @@ class DirectoryExecutor(ClusterExecutor):
 
         return existed
 
+def execute_directory_job(path):
+    input = numpy_pickle.load(os.path.join(path, 'input.pkl'))
+    func, args, kwargs = [input[x] for x in ['func', 'args', 'kwargs']]
+    output = func(*args, **kwargs)
+    numpy_pickle.dump(output, os.path.join(path, 'output.pkl'))
+
 class DirectoryFuture(ClusterFuture):
     """
     Cluster job based on preserving state in a directory in a local
@@ -152,15 +159,18 @@ class DirectoryFuture(ClusterFuture):
     # and ensure that unpickling this object on a different
     # host changes self.path accordingly.
     
-    def __init__(self, store_path, job_path):
-        self.path = os.path.realpath(os.path.join(store_path, job_path))
-        self._constructed = os.path.exists(self.path)
+    def __init__(self, executor, job_name):
+        self.job_name = job_name
+        self._executor = executor
+        self.job_path = os.path.realpath(os.path.join(self._executor.store_path, job_name))
+
 
 
 class SlurmExecutor(DirectoryExecutor):
     configuration_keys = DirectoryExecutor.configuration_keys + (
         'account', 'nodes', 'mem_per_cpu', 'time',
-        'tmp', 'ntasks_per_node', 'omp_num_threads')
+        'tmp', 'ntasks_per_node', 'omp_num_threads',
+        'sbatch_command_pattern')
     default_nodes = 1
     default_mem_per_cpu = '2000M'
     default_time = '01:00:00' # max run time
@@ -172,12 +182,17 @@ class SlurmExecutor(DirectoryExecutor):
     pre_command = ''
     post_command = ''
     python_command = 'python'
+
+    def _slurm(self, scriptfile):
+        cmd = "sbatch '%s'" % scriptfile
+        if os.system(cmd) != 0:
+            raise RuntimeError('command failed: %s' % cmd)
     
     def get_launch_command(self, fullpath):
         return dedent("""\
         {python} <<END
-        from joblib.hpc.executor import execute_job
-        execute_job(\"{fullpath}\")
+        from joblib.hpc.executor import execute_directory_job
+        execute_directory_job(\"{fullpath}\")
         END
         """.format(python=self.python_command,
                    fullpath=fullpath))
@@ -201,12 +216,44 @@ class SlurmExecutor(DirectoryExecutor):
     def _create_future_from_job_dir(self, job_path):
         return SlurmFuture(self, job_path)
 
-    
+
+class TitanOsloExecutor(SlurmExecutor):
+    default_sbatch_command_pattern = 'ssh titan.uio.no "bash -ic \'sbatch %s\'"'
+
+    def _slurm(self, scriptfile):
+        from subprocess import Popen, PIPE
+        pp = Popen(['ssh', '-T', 'titan.uio.no'], stdin=PIPE, stderr=PIPE)
+        pp.stdin.write("sbatch '%s'" % scriptfile)
+        pp.stdin.close()
+        err = pp.stderr.read()
+        pp.stderr.close()
+        retcode = pp.wait()
+        if retcode != 0:
+            raise RuntimeError('Return code %d: %s\nError log:\n%s' % (retcode, ' '.join(cmd),
+                                                                       err))
 class SlurmFuture(DirectoryFuture):
-    def __init__(self, config, target_path):
-        self.config = config
-        self.target_path = target_path
-        
+
+    def cancel(self):
+        pass
+    
+    def cancelled():
+        pass
+    
+    def running():
+        pass
+
+    def done():
+        pass
+    
+    def result(timeout=None):
+        pass
+    
+    def exception(timeout=None):
+        pass
+    
+    def submit(self):
+        scriptfile = os.path.join(self.job_path, 'sbatchscript')
+        self._executor._slurm(scriptfile)
         
 def make_slurm_script(jobname, command, logfile, where=None, ntasks=1, nodes=None,
                       openmp=1, time='24:00:00', constraints=(),
