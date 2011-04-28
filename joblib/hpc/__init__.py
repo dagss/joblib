@@ -5,6 +5,8 @@ from ..func_inspect import filter_args, get_func_code, get_func_name
 from ..hashing import hash
 import hashlib
 
+from executor import *
+
 __all__ = ['noeffects', 'versioned']
 
 def versioned_call(func, *args, **kwargs):
