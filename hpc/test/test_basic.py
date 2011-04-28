@@ -15,14 +15,16 @@ def test_versioned():
     yield ok_, hasattr(f, 'version_info')
     if hasattr(f, 'version_info'):
         d = dict(f.version_info)
-        yield eq_, len(d['digest']), 64
+        yield eq_, len(d['digest']), 20
         del d['digest']
+        del d['hexdigest']
         yield eq_, d, dict(version=4, ignore_deps=True, ignore_args=('y',))
     
 
     yield ok_, hasattr(g, 'version_info')
     if hasattr(g, 'version_info'):
         d = dict(g.version_info)
-        yield eq_, len(d['digest']), 64
+        yield eq_, len(d['digest']), 20
         del d['digest']
+        del d['hexdigest']
         yield eq_, d, dict(version=None, ignore_deps=False, ignore_args=())

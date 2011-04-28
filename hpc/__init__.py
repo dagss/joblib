@@ -41,10 +41,8 @@ def noeffects():
 
 def versioned(version=None, ignore_deps=False, ignore=()):
     def dec(func):
-        # Make hash. This is only done once, and will be combined
-        # with other hashes, so may as well use 512 bits. The
-        # function hash does not consider dependencies.
-        h = hashlib.sha512()
+        # Make hash. The function hash does not consider dependencies.
+        h = hashlib.sha1()
         module, name = get_func_name(func)
         h.update('.'.join(module + [name]))
         h.update('$')
@@ -54,11 +52,11 @@ def versioned(version=None, ignore_deps=False, ignore=()):
             h.update(src)
         else:
             h.update(str(version))
-        digest = h.digest()
         # Store information
         func.version_info = dict(version=version,
                                  ignore_deps=bool(ignore_deps),
                                  ignore_args=tuple(ignore),
-                                 digest=digest)
+                                 digest=h.digest(),
+                                 hexdigest=h.hexdigest())
         return func
     return dec
