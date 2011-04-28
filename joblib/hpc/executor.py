@@ -209,6 +209,24 @@ class DirectoryFuture(ClusterFuture):
         return self._finished() or self.cancelled()
     
     def result(self, timeout=None):
+        status, output = self._result(timeout)
+        if status == 'exception':
+            raise output
+        elif status == 'finished':
+            return output
+        else:
+            assert False
+    
+    def exception(self, timeout=None):
+        status, output = self._result(timeout)
+        if status == 'exception':
+            return output
+        elif status == 'finished':
+            return None
+        else:
+            assert False
+
+    def _result(self, timeout=None):
         sleeptime = self._executor.poll_interval
         logger = self._executor.logger
         if timeout is not None:
@@ -216,18 +234,11 @@ class DirectoryFuture(ClusterFuture):
             endtime = time.time() + timeout            
         while True:
             if self._finished():
-                status, output = self._load_output()
-                if status == 'exception':
-                    raise output
-                elif status == 'finished':
-                    return output
+                return self._load_output()
             logger.debug('Waiting for job (sleeptime=%s): %s', sleeptime, self.job_name)
             if timeout is not None and time.time() >= endtime:
                 raise TimeoutError()
-            time.sleep(sleeptime)
-    
-    def exception(timeout=None):
-        pass
+            time.sleep(sleeptime)       
 
     def _finished(self):
         return os.path.exists(pjoin(self.job_path, 'output.pkl'))

@@ -11,4 +11,5 @@ fut1 = e.submit(func1, 2, 3)
 fut2 = e.submit(funcex, 2, 3)
 
 print fut1.result()
+print type(fut2.exception(100))
 print fut2.result(100)
