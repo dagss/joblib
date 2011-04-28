@@ -10,6 +10,7 @@ import tempfile
 import base64
 from concurrent.futures import Executor
 from textwrap import dedent
+from os.path import join as pjoin
 
 from ..func_inspect import filter_args
 from ..hashing import NumpyHasher
@@ -93,7 +94,7 @@ class DirectoryExecutor(ClusterExecutor):
         args_hash = self._encode_digest(h._hash.digest())
         func_hash = '%s-%s' % (func.__name__,
                                self._encode_digest(func.version_info['digest']))
-        job_name = os.path.join(func_hash, args_hash)
+        job_name = pjoin(func_hash, args_hash)
         # Construct job dir if not existing. Remember that we may
         # race for this; if we got to create the directory, we have
         # the lock.
@@ -108,7 +109,7 @@ class DirectoryExecutor(ClusterExecutor):
         Bool ``existed`` indicating if the job already existed in
         the file system.
         """
-        jobpath = os.path.join(self.store_path, job_name)
+        jobpath = pjoin(self.store_path, job_name)
         if os.path.exists(jobpath):
             return True
         parentpath = os.path.dirname(jobpath)
@@ -121,7 +122,7 @@ class DirectoryExecutor(ClusterExecutor):
         try:
             # Dump call to file
             call_info = dict(func=func, args=args, kwargs=kwargs)
-            numpy_pickle.dump(call_info, os.path.join(workpath, 'input.pkl'))
+            numpy_pickle.dump(call_info, pjoin(workpath, 'input.pkl'))
 
             # Create job script
             self._create_jobscript(func.__name__, job_name, workpath)
@@ -143,7 +144,7 @@ class DirectoryExecutor(ClusterExecutor):
         return existed
 
 def execute_directory_job(path):
-    input = numpy_pickle.load(os.path.join(path, 'input.pkl'))
+    input = numpy_pickle.load(pjoin(path, 'input.pkl'))
     func, args, kwargs = [input[x] for x in ['func', 'args', 'kwargs']]
     output = func(*args, **kwargs)
     numpy_pickle.dump(output, os.path.join(path, 'output.pkl'))
@@ -162,7 +163,7 @@ class DirectoryFuture(ClusterFuture):
     def __init__(self, executor, job_name):
         self.job_name = job_name
         self._executor = executor
-        self.job_path = os.path.realpath(os.path.join(self._executor.store_path, job_name))
+        self.job_path = os.path.realpath(pjoin(self._executor.store_path, job_name))
 
 
 
@@ -198,11 +199,11 @@ class SlurmExecutor(DirectoryExecutor):
                    fullpath=fullpath))
 
     def _create_jobscript(self, human_name, job_name, work_path):
-        jobscriptpath = os.path.join(work_path, 'sbatchscript')
+        jobscriptpath = pjoin(work_path, 'sbatchscript')
         script = make_slurm_script(
             jobname=human_name,
-            command=self.get_launch_command(os.path.join(self.store_path, job_name)),
-            logfile=os.path.join(self.store_path, job_name, 'log'),
+            command=self.get_launch_command(pjoin(self.store_path, job_name)),
+            logfile=pjoin(self.store_path, job_name, 'log'),
             precmd=self.pre_command,
             postcmd=self.post_command,
             queue=self.account,
@@ -252,7 +253,7 @@ class SlurmFuture(DirectoryFuture):
         pass
     
     def submit(self):
-        scriptfile = os.path.join(self.job_path, 'sbatchscript')
+        scriptfile = pjoin(self.job_path, 'sbatchscript')
         self._executor._slurm(scriptfile)
         
 def make_slurm_script(jobname, command, logfile, where=None, ntasks=1, nodes=None,
