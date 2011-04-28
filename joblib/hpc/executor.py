@@ -69,15 +69,20 @@ class ClusterExecutor(object):
     def _create_future(self, func, args, kwargs, filtered_args_dict, should_submit):
         raise NotImplementedError()
 
-
+class NullLogger(object):
+    def info(self, *args):
+        pass
+    error = debug = warning = info
+null_logger = NullLogger()
 
 class DirectoryExecutor(ClusterExecutor):
     configuration_keys = ClusterExecutor.configuration_keys + (
-        'store_path', 'poll_interval')
+        'store_path', 'poll_interval', 'logger')
     default_store_path = (os.environ['JOBSTORE']
                           if 'JOBSTORE' in os.environ
                           else None)
     default_poll_interval = 5
+    default_logger = null_logger
 
     def _encode_digest(self, digest):
         # Use base64 but ensure there's no padding (pad digest up front).
@@ -106,8 +111,13 @@ class DirectoryExecutor(ClusterExecutor):
         # the lock.
         we_made_it = self._ensure_job_dir(job_name, func, args, kwargs)
         future = self._create_future_from_job_dir(job_name)
-        if should_submit and we_made_it:
-            future.submit()
+        if we_made_it:
+            self.logger.info('Created job: %s' % job_name)
+            if should_submit:
+                jobid = future.submit()
+                self.logger.info('Submitted job as %s: %s' % (jobid, job_name))
+        else:
+            self.logger.info('Job already exists: %s' % job_name)
         return future
 
     def _ensure_job_dir(self, job_name, func, args, kwargs):
@@ -200,6 +210,7 @@ class DirectoryFuture(ClusterFuture):
     
     def result(self, timeout=None):
         sleeptime = self._executor.poll_interval
+        logger = self._executor.logger
         if timeout is not None:
             sleeptime = min(sleeptime, timeout)
             endtime = time.time() + timeout            
@@ -210,6 +221,7 @@ class DirectoryFuture(ClusterFuture):
                     raise output
                 elif status == 'finished':
                     return output
+            logger.debug('Waiting for job (sleeptime=%s): %s', sleeptime, self.job_name)
             if timeout is not None and time.time() >= endtime:
                 raise TimeoutError()
             time.sleep(sleeptime)
@@ -221,6 +233,7 @@ class DirectoryFuture(ClusterFuture):
         return os.path.exists(pjoin(self.job_path, 'output.pkl'))
 
     def _load_output(self):
+        self._executor.logger.debug('Loading job output: %s', self.job_name)
         return numpy_pickle.load(pjoin(self.job_path, 'output.pkl'))
         
 
@@ -309,7 +322,9 @@ class SlurmFuture(DirectoryFuture):
         with file(pjoin(self.job_path, 'jobid'), 'w') as f:
             f.write(jobid + '\n')
         with file(pjoin(self.job_path, 'log'), 'w') as f:
-            f.write('%s submitted job (%s), waiting to start\n' % (strftime('%Y-%m-%d %H:%M:%S'), jobid))
+            f.write('%s submitted job (%s), waiting to start\n' %
+                    (strftime('%Y-%m-%d %H:%M:%S'), jobid))
+        return jobid
         
 def make_slurm_script(jobname, command, logfile, where=None, ntasks=1, nodes=None,
                       openmp=1, time='24:00:00', constraints=(),
