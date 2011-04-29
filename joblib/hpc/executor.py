@@ -105,7 +105,7 @@ class DirectoryExecutor(ClusterExecutor):
             # this run here, in case a depdency just got changed. This
             # should be done by consulting a pickled on-file database
             # AFAICT.
-            raise NotImplementedError()
+            raise NotImplementedError('Please use ignore_deps for now')
 
         # Make job_path containing hashes
         h = NumpyHasher('sha1')
