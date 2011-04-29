@@ -100,7 +100,7 @@ def teardown_module():
 
 
 @versioned(1, ignore_deps=True)
-def f(x, y):
+def func(x, y):
     return x + y
 
 def test_basic():
@@ -115,9 +115,9 @@ def test_basic():
             input = load('input.pkl')
             tests.append((eq_, input, dict(
                 args=(1, 1),
-                func=f,
+                func=func,
                 kwargs={})))
-            tests.append((eq_, 'jobscript for job f\n',
+            tests.append((eq_, 'jobscript for job func\n',
                           filecontents('jobscript')))
     
     executor = MockExecutor(store_path=store_path,
@@ -125,7 +125,7 @@ def test_basic():
                             before_submit_hook=before_submit)
 
     # Run a single job, check that it executes, and check input/output
-    fut = executor.submit(f, 1, 1)    
+    fut = executor.submit(func, 1, 1)    
     yield eq_, executor.submit_count, 1
     yield eq_, fut.result(), 2
     yield ne_, executor.given_work_paths[0], fut.job_path
@@ -137,13 +137,13 @@ def test_basic():
         yield eq_, filecontents('jobid'), 'job-0\n'
 
     # Re-run and check that result is loaded from cache
-    fut = executor.submit(f, 1, 1)
+    fut = executor.submit(func, 1, 1)
     yield eq_, fut.result(), 2
     yield eq_, executor.submit_count, 1
 
     # Run yet again with different input
     executor.before_submit_hook = lambda x: None
-    fut2 = executor.submit(f, 1, 2)
+    fut2 = executor.submit(func, 1, 2)
     yield eq_, fut2.result(), 3
     yield eq_, executor.submit_count, 2
     yield ne_, fut2.job_path, fut.job_path
