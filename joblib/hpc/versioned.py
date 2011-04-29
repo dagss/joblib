@@ -55,8 +55,7 @@ def versioned(version=None, deps=True, ignore=()):
         func.version_info = dict(version=_version,
                                  ignore_deps=deps == False,
                                  ignore_args=tuple(ignore),
-                                 digest=h.digest(),
-                                 hexdigest=h.hexdigest())
+                                 digest=h.digest())
         return func
     if passed_func is None:
         return dec
