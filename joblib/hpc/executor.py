@@ -17,6 +17,7 @@ from os.path import join as pjoin
 from ..func_inspect import filter_args
 from ..hashing import NumpyHasher
 from .. import numpy_pickle
+from . import fileref as fileref_module
 
 __all__ = ['ClusterFuture', 'ClusterExecutor', 'DirectoryExecutor', 'DirectoryFuture']
 
@@ -172,32 +173,6 @@ class DirectoryExecutor(ClusterExecutor):
         execute_directory_job(\"%s\")
         """ % fullpath.replace('\\', '\\\\').replace('"', '\\"'))
 
-def execute_directory_job(path):
-    input = numpy_pickle.load(pjoin(path, 'input.pkl'))
-    func, version_info, args, kwargs = [input[x] for x in ['func',
-                                                           'version_info',
-                                                           'args',
-                                                           'kwargs']]
-    if version_info != func.version_info:
-        raise RuntimeError('Source revision mismatch: Submitted job with version '
-                           '%s of %s, but available source has version %s' %
-                           (version_info['version'], func.__name__,
-                            func.version_info['version']))
-    try:
-        output = ('finished', func(*args, **kwargs))
-    except BaseException:
-        output = ('exception', sys.exc_info()[1])
-    # Do an atomic pickle; if output.pkl is present then it is complete
-    fd, workfile = tempfile.mkstemp(prefix='output.pkl-', dir=path)
-    try:
-        os.close(fd)
-        numpy_pickle.dump(output, workfile)
-        os.rename(workfile, pjoin(path, 'output.pkl'))
-    except:
-        if os.path.exists(workfile):
-            os.unlink(workfile)
-        raise
-
 class DirectoryFuture(ClusterFuture):
     """
     Cluster job based on preserving state in a directory in a local
@@ -273,3 +248,32 @@ class DirectoryFuture(ClusterFuture):
             f.write('%s submitted job (%s), waiting to start\n' %
                     (time.strftime('%Y-%m-%d %H:%M:%S'), jobid))
         return jobid
+
+def execute_directory_job(path):
+    input = numpy_pickle.load(pjoin(path, 'input.pkl'))
+    func, version_info, args, kwargs = [input[x] for x in ['func',
+                                                           'version_info',
+                                                           'args',
+                                                           'kwargs']]
+    if version_info != func.version_info:
+        raise RuntimeError('Source revision mismatch: Submitted job with version '
+                           '%s of %s, but available source has version %s' %
+                           (version_info['version'], func.__name__,
+                            func.version_info['version']))
+    fileref_module.store_path, fileref_module.job_name = (
+        os.path.split(os.getcwd()))
+    try:
+        output = ('finished', func(*args, **kwargs))
+    except BaseException:
+        output = ('exception', sys.exc_info()[1])
+    # Do an atomic pickle; if output.pkl is present then it is complete
+    fd, workfile = tempfile.mkstemp(prefix='output.pkl-', dir=path)
+    try:
+        os.close(fd)
+        numpy_pickle.dump(output, workfile)
+        os.rename(workfile, pjoin(path, 'output.pkl'))
+    except:
+        if os.path.exists(workfile):
+            os.unlink(workfile)
+        raise
+
