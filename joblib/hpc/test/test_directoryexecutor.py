@@ -7,6 +7,7 @@ import tempfile
 import shutil
 import os
 import contextlib
+import functools
 from os.path import join as pjoin
 from nose.tools import ok_, eq_, assert_raises
 
@@ -48,7 +49,12 @@ class MockExecutor(DirectoryExecutor):
             f.write('jobscript for job %s\n' % human_name)
 
 
+class MockFutureError(Exception):
+    pass
+
 class MockFuture(DirectoryFuture):
+    subfuture = None # stays None for cached jobs
+    
     def _submit(self):
         if self._executor.before_submit_hook:
             self._executor.before_submit_hook(self)
@@ -58,6 +64,7 @@ class MockFuture(DirectoryFuture):
         assert isinstance(self.job_path, str)
         self.subfuture = procex.submit(execute_directory_job, self.job_path)
         return 'job-%d' % (self._executor.submit_count - 1)
+
 
 #
 # Test utils
@@ -82,27 +89,51 @@ def filecontents(filename):
     with file(filename) as f:
         return f.read()
 
+@contextlib.contextmanager
+def function_replaced_in_process(sourcename, targetname):
+    """
+    Temporarily replace a function in this module so that it
+    pickles/unpickles
+    """
+    source = globals()[sourcename]
+    target = globals()[targetname]
+    source_name = source.__name__
+    try:
+        source.__name__ = target.__name__
+        globals()[targetname] = source
+        yield
+    finally:
+        globals()[targetname] = target
+        source.__name__ = source_name
+
 #
 # Test context
 #
-def setup_module():
-    global logger, store_path
 
-    store_path = tempfile.mkdtemp(prefix='jobstore-')
-    logging.basicConfig()
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
-    logger.info('JOBSTORE=%s' % store_path)
-
-def teardown_module():
-    if KEEPSTORE:
-        shutil.rmtree(store_path)
-
+def with_store():
+    def with_store_dec(func):
+        @functools.wraps(func)
+        def inner():
+            global store_path, logger
+            store_path = tempfile.mkdtemp(prefix='jobstore-')
+            logging.basicConfig()
+            logger = logging.getLogger()
+            logger.setLevel(logging.DEBUG)
+            logger.info('JOBSTORE=%s' % store_path)
+            try:
+                for x in func():
+                    yield x
+            finally:
+                if KEEPSTORE:
+                    shutil.rmtree(store_path)
+        return inner
+    return with_store_dec
 
 @versioned(1, ignore_deps=True)
 def func(x, y):
     return x + y
 
+@with_store()
 def test_basic():
     "Basic tests"
     tests = []
@@ -116,6 +147,7 @@ def test_basic():
             tests.append((eq_, input, dict(
                 args=(1, 1),
                 func=func,
+                version_info=func.version_info,
                 kwargs={})))
             tests.append((eq_, 'jobscript for job func\n',
                           filecontents('jobscript')))
@@ -160,6 +192,7 @@ class MyException(Exception):
 def throws(x, y):
     raise MyException('message %s %s' % (x, y))
 
+@with_store()
 def test_exception():
     "Exception propagation"
     executor = MockExecutor(store_path=store_path,
@@ -168,3 +201,45 @@ def test_exception():
     yield assert_raises, MyException, fut.result
     yield eq_, str(fut.exception()), 'message a b'
     
+
+@versioned(2, ignore_deps=True)
+def func_2(x, y):
+    return x + y + 1
+
+@with_store()
+def test_different_versions():
+    "Difference in source code versions causes errors"
+    # We replace the func function in the current process; but
+    # spawning another process will get the original func. So we try
+    # to compute a job using the "wrong source".  Guard against this
+    # situation (e.g., user did not push source code to cluster, and
+    # submitted job from laptop).
+    global func
+
+    executor = MockExecutor(store_path=store_path,
+                            logger=logger)
+
+    assert func is not func_2
+    fut = executor.submit(func, 1, 1)
+    yield eq_, fut.result(), 2
+    print fut.job_path
+    
+    with function_replaced_in_process('func_2', 'func'):
+        assert func is func_2
+        fut = executor.submit(func, 1, 1)
+
+    yield ok_, fut.subfuture is not None
+    print fut.job_path
+
+    # Trap the expected error from the IPC subfuture.
+    # For a concrete cluster implementation the effect is that
+    # "the job dies", and the exception is found in the logs.
+    try:
+        print fut.subfuture.result()
+    except RuntimeError, e:
+        yield (eq_, str(e),
+               'Source revision mismatch: Submitted job with '
+               'version 2 of func, but available source has version 1')
+    else:
+        yield ok_, False, 'Source mismatch did not cause error'
+

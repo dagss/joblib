@@ -146,7 +146,8 @@ class DirectoryExecutor(ClusterExecutor):
                                     dir=parentpath)
         try:
             # Dump call to file
-            call_info = dict(func=func, args=args, kwargs=kwargs)
+            call_info = dict(func=func, version_info=func.version_info,
+                             args=args, kwargs=kwargs)
             numpy_pickle.dump(call_info, pjoin(workpath, 'input.pkl'))
 
             # Create job script
@@ -170,7 +171,15 @@ class DirectoryExecutor(ClusterExecutor):
 
 def execute_directory_job(path):
     input = numpy_pickle.load(pjoin(path, 'input.pkl'))
-    func, args, kwargs = [input[x] for x in ['func', 'args', 'kwargs']]
+    func, version_info, args, kwargs = [input[x] for x in ['func',
+                                                           'version_info',
+                                                           'args',
+                                                           'kwargs']]
+    if version_info != func.version_info:
+        raise RuntimeError('Source revision mismatch: Submitted job with version '
+                           '%s of %s, but available source has version %s' %
+                           (version_info['version'], func.__name__,
+                            func.version_info['version']))
     try:
         output = ('finished', func(*args, **kwargs))
     except BaseException:
