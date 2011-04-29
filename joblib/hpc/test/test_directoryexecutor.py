@@ -8,7 +8,7 @@ import shutil
 import os
 import contextlib
 from os.path import join as pjoin
-from nose.tools import ok_, eq_
+from nose.tools import ok_, eq_, assert_raises
 
 from ..executor import DirectoryExecutor, DirectoryFuture, execute_directory_job
 from .. import versioned
@@ -17,6 +17,7 @@ from ...numpy_pickle import load, dump
 
 # Debug settings
 KEEPSTORE = False
+# To see log during debugging, use 'nosetests --nologcapture'
 
 #
 # Create mock executors that simply forwards to ProcessPoolExecutor
@@ -28,6 +29,9 @@ KEEPSTORE = False
 class MockExecutor(DirectoryExecutor):
     configuration_keys = DirectoryExecutor.configuration_keys + (
         'before_submit_hook',)
+
+    default_before_submit_hook = False
+    default_poll_interval = 1e-1
     
     def __init__(self, *args, **kw):
         DirectoryExecutor.__init__(self, *args, **kw)
@@ -46,7 +50,8 @@ class MockExecutor(DirectoryExecutor):
 
 class MockFuture(DirectoryFuture):
     def _submit(self):
-        self._executor.before_submit_hook(self)
+        if self._executor.before_submit_hook:
+            self._executor.before_submit_hook(self)
         self._executor.submit_count += 1
         self._executor.logger.debug('Submitting job')
         procex = self._executor.subexecutor
@@ -99,6 +104,7 @@ def f(x, y):
     return x + y
 
 def test_basic():
+    "Basic tests"
     tests = []
     PRE_SUBMIT_LS = set(['input.pkl', 'jobscript'])
     COMPUTED_LS = PRE_SUBMIT_LS.union(['output.pkl', 'jobid', 'log'])
@@ -116,7 +122,6 @@ def test_basic():
     
     executor = MockExecutor(store_path=store_path,
                             logger=logger,
-                            poll_interval=1e-1,
                             before_submit_hook=before_submit)
 
     # Run a single job, check that it executes, and check input/output
@@ -148,6 +153,18 @@ def test_basic():
     for x in tests:
         yield x
     
+class MyException(Exception):
+    pass
 
+@versioned(1, ignore_deps=True)
+def throws(x, y):
+    raise MyException('message %s %s' % (x, y))
 
+def test_exception():
+    "Exception propagation"
+    executor = MockExecutor(store_path=store_path,
+                            logger=logger)
+    fut = executor.submit(throws, 'a', 'b')
+    yield assert_raises, MyException, fut.result
+    yield eq_, str(fut.exception()), 'message a b'
     
