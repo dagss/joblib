@@ -229,7 +229,6 @@ def test_different_versions():
         fut = executor.submit(func, 1, 1)
 
     yield ok_, fut.subfuture is not None
-    print fut.job_path
 
     # Trap the expected error from the IPC subfuture.
     # For a concrete cluster implementation the effect is that

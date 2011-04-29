@@ -5,8 +5,8 @@ import logging
 logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
-e = TitanOsloExecutor(account='quiet', logger=logger)
 
+e = TitanOsloExecutor(account='quiet', logger=logger)
 fut1 = e.submit(func1, 2, 3)
 fut2 = e.submit(funcex, 2, 3)
 
@@ -15,3 +15,6 @@ print type(fut2.exception(100))
 print fut2.result(100)
 
 # TODO check function hash
+
+# TODO detach daemon in process spawner:
+# http://stackoverflow.com/questions/972362/spawning-process-from-python
