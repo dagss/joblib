@@ -16,7 +16,7 @@ def versioned_call(func, *args, **kwargs):
     In addition to the output of the function, one gets a list of the
     functions called during the computation that are decorated with
     the @versioned decorator. Tracing is temporarily turned
-    off when encountering functions flagged with "ignore_deps==True".
+    off when encountering functions flagged with "deps==False".
 
     Returns
     -------
@@ -41,11 +41,11 @@ def noeffects():
         return func
     return dec
 
-def versioned(version=None, ignore_deps=False, ignore=()):
+def versioned(version=None, deps=True, ignore=()):
     passed_func = None
     if hasattr(version, '__call__'):
         # Used as decorator without ()
-        if ignore_deps != False or ignore != ():
+        if deps != True or ignore != ():
             raise TypeError('Invalid version argument')
         passed_func = version
         version = None
@@ -63,7 +63,7 @@ def versioned(version=None, ignore_deps=False, ignore=()):
             h.update(str(version))
         # Store information
         func.version_info = dict(version=version,
-                                 ignore_deps=bool(ignore_deps),
+                                 ignore_deps=deps == False,
                                  ignore_args=tuple(ignore),
                                  digest=h.digest(),
                                  hexdigest=h.hexdigest())

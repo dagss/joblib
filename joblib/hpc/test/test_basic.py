@@ -6,7 +6,7 @@ def test_versioned():
     def dec_no_parens(x):
         pass
 
-    @versioned(4, ignore_deps=1, ignore=['y'])
+    @versioned(4, deps=False, ignore=['y'])
     def f(x, y):
         return x**2 + y
 

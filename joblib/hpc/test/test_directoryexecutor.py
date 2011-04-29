@@ -129,7 +129,7 @@ def with_store():
         return inner
     return with_store_dec
 
-@versioned(1, ignore_deps=True)
+@versioned(1, deps=False)
 def func(x, y):
     return x + y
 
@@ -188,7 +188,7 @@ def test_basic():
 class MyException(Exception):
     pass
 
-@versioned(1, ignore_deps=True)
+@versioned(1, deps=False)
 def throws(x, y):
     raise MyException('message %s %s' % (x, y))
 
@@ -202,7 +202,7 @@ def test_exception():
     yield eq_, str(fut.exception()), 'message a b'
     
 
-@versioned(2, ignore_deps=True)
+@versioned(2, deps=False)
 def func_2(x, y):
     return x + y + 1
 
