@@ -9,11 +9,11 @@ import errno
 import shutil
 import tempfile
 import time
+import base64
 from concurrent.futures import Executor, TimeoutError
 from textwrap import dedent
 from os.path import join as pjoin
 
-from .versioned import encode_digest_base64
 from ..func_inspect import filter_args
 from ..hashing import NumpyHasher
 from .. import numpy_pickle
@@ -93,7 +93,7 @@ class DirectoryExecutor(ClusterExecutor):
     default_logger = null_logger
 
     def _encode_digest(self, digest):
-        return encode_digest_base64(digest)
+        return base64.b32encode(digest).lower()
 
     def _create_future(self, func, args, kwargs, filtered_args_dict, should_submit):
         if not func.version_info['ignore_deps']:

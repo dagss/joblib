@@ -6,13 +6,6 @@ import base64
 
 __all__ = ['versioned']
 
-def encode_digest_base64(digest):
-    # Use base64 but ensure there's no padding (pad digest up front).
-    # Replace / with _ in alphabet.
-    while (len(digest) * 8 % 6) != 0:
-        digest += '\0'
-    return base64.b64encode(digest, '_+')
-
 def versioned_call(func, *args, **kwargs):
     """ Calls a function and tracks versioned functions being called.
 
@@ -54,7 +47,7 @@ def versioned(version=None, deps=True, ignore=()):
         if version is None:
             # No manual version; use the hash of the contents as version
             src, source_file, lineno = get_func_code(func)
-            _version = encode_digest_base64(hashlib.sha1(src).digest())
+            _version = base64.b32encode(hashlib.sha1(src).digest()).lower()
         else:
             _version = str(version)
         h.update(_version.encode('UTF-8'))

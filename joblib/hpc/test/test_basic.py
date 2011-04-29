@@ -31,5 +31,7 @@ def test_versioned():
         yield eq_, len(d['digest']), 20
         del d['digest']
         del d['hexdigest']
-        yield eq_, d, dict(version='J8GOY5TQ4zEWPVF7EHkqfgaTuZUA',
+        yield eq_, d, dict(version='e7ay4y4u2drtcfr5kf5ra6jkpydjhomv',
                            ignore_deps=False, ignore_args=())
+
+
