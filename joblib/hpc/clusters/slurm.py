@@ -26,20 +26,19 @@ class SlurmExecutor(DirectoryExecutor):
         if os.system(cmd) != 0:
             raise RuntimeError('command failed: %s' % cmd)
     
-    def get_launch_command(self, fullpath):
+    def get_launch_command(self, job_name):
         return dedent("""\
         {python} <<END
-        from joblib.hpc.executor import execute_directory_job
-        execute_directory_job(\"{fullpath}\")
+        {script}
         END
-        """.format(python=self.python_command,
-                   fullpath=fullpath))
+        """).format(python=self.python_command,
+                    script=self.get_launching_python_code(job_name))
 
     def _create_jobscript(self, human_name, job_name, work_path):
         jobscriptpath = pjoin(work_path, 'sbatchscript')
         script = make_slurm_script(
             jobname=human_name,
-            command=self.get_launch_command(pjoin(self.store_path, job_name)),
+            command=self.get_launch_command(job_name),
             logfile=pjoin(self.store_path, job_name, 'log'),
             precmd=self.pre_command,
             postcmd=self.post_command,

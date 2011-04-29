@@ -86,7 +86,7 @@ class ClusterExecutor(object):
 class DirectoryExecutor(ClusterExecutor):
     configuration_keys = ClusterExecutor.configuration_keys + (
         'store_path', 'poll_interval', 'logger')
-    default_store_path = (os.environ['JOBSTORE']
+    default_store_path = (os.path.realpath(os.environ['JOBSTORE'])
                           if 'JOBSTORE' in os.environ
                           else None)
     default_poll_interval = 5
@@ -164,6 +164,13 @@ class DirectoryExecutor(ClusterExecutor):
             raise
 
         return we_made_it
+
+    def get_launching_python_code(self, job_name):
+        fullpath = pjoin(self.store_path, job_name)
+        return dedent("""\
+        from joblib.hpc.executor import execute_directory_job
+        execute_directory_job(\"%s\")
+        """ % fullpath.replace('\\', '\\\\').replace('"', '\\"'))
 
 def execute_directory_job(path):
     input = numpy_pickle.load(pjoin(path, 'input.pkl'))
