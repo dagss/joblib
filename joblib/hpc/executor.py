@@ -109,11 +109,9 @@ class DirectoryExecutor(ClusterExecutor):
 
         # Make job_path containing hashes
         h = NumpyHasher('sha1')
-        h.hash(filtered_args_dict)
-        args_hash = self._encode_digest(h._hash.digest())
-        func_hash = '%s-%s' % (func.__name__,
-                               self._encode_digest(func.version_info['digest']))
-        job_name = pjoin(func_hash, args_hash)
+        h.hash((func.version_info['digest'], filtered_args_dict))
+        job_name = '%s-%s' % (func.__name__,
+                              self._encode_digest(h._hash.digest()))
         # Construct job dir if not existing. Remember that we may
         # race for this; if we got to create the directory, we have
         # the lock.
