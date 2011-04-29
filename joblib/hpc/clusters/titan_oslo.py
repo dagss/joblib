@@ -1,5 +1,4 @@
 import re
-from time import strftime
 from subprocess import Popen, PIPE
 from .slurm import SlurmExecutor
 

@@ -55,14 +55,9 @@ class SlurmExecutor(DirectoryExecutor):
         return SlurmFuture(self, job_path)
         
 class SlurmFuture(DirectoryFuture):
-    def submit(self):
+    def _submit(self):
         scriptfile = pjoin(self.job_path, 'sbatchscript')
         jobid = self._executor._slurm(scriptfile)
-        with file(pjoin(self.job_path, 'jobid'), 'w') as f:
-            f.write(jobid + '\n')
-        with file(pjoin(self.job_path, 'log'), 'w') as f:
-            f.write('%s submitted job (%s), waiting to start\n' %
-                    (strftime('%Y-%m-%d %H:%M:%S'), jobid))
         return jobid
         
 def make_slurm_script(jobname, command, logfile, where=None, ntasks=1, nodes=None,

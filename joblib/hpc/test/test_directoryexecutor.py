@@ -6,6 +6,7 @@ import logging
 import tempfile
 import shutil
 import os
+import contextlib
 from os.path import join as pjoin
 from nose.tools import ok_, eq_
 
@@ -44,25 +45,37 @@ class MockExecutor(DirectoryExecutor):
 
 
 class MockFuture(DirectoryFuture):
-    def submit(self):
+    def _submit(self):
         self._executor.before_submit_hook(self)
         self._executor.submit_count += 1
         self._executor.logger.debug('Submitting job')
         procex = self._executor.subexecutor
         assert isinstance(self.job_path, str)
         self.subfuture = procex.submit(execute_directory_job, self.job_path)
-        return id(self.subfuture)
+        return 'job-%d' % (self._executor.submit_count - 1)
 
 #
 # Test utils
 #
-def ls(path):
-    l = os.listdir(path)
-    l.sort()
-    return l
+
+@contextlib.contextmanager
+def working_directory(path):
+    old = os.getcwd()
+    try:
+        os.chdir(path)
+        yield
+    finally:
+        os.chdir(old)
+
+def ls(path='.'):
+    return set(os.listdir(path))
 
 def ne_(a, b):
     assert a != b, "%r == %r" % (a, b)
+
+def filecontents(filename):
+    with file(filename) as f:
+        return f.read()
 
 #
 # Test context
@@ -87,15 +100,19 @@ def f(x, y):
 
 def test_basic():
     tests = []
+    PRE_SUBMIT_LS = set(['input.pkl', 'jobscript'])
+    COMPUTED_LS = PRE_SUBMIT_LS.union(['output.pkl', 'jobid', 'log'])
+    
     def before_submit(fut):
-        tests.append((eq_, ls(fut.job_path), ['input.pkl', 'jobscript']))
-        input = load(pjoin(fut.job_path, 'input.pkl'))
-        tests.append((eq_, input, dict(
-            args=(1, 1),
-            func=f,
-            kwargs={})))
-        with file(pjoin(fut.job_path, 'jobscript')) as ff:
-            tests.append((eq_, 'jobscript for job f\n', ff.read()))
+        with working_directory(fut.job_path):
+            tests.append((eq_, ls(), PRE_SUBMIT_LS))
+            input = load('input.pkl')
+            tests.append((eq_, input, dict(
+                args=(1, 1),
+                func=f,
+                kwargs={})))
+            tests.append((eq_, 'jobscript for job f\n',
+                          filecontents('jobscript')))
     
     executor = MockExecutor(store_path=store_path,
                             logger=logger,
@@ -103,16 +120,16 @@ def test_basic():
                             before_submit_hook=before_submit)
 
     # Run a single job, check that it executes, and check input/output
-    yield eq_, len(executor.given_work_paths), 0
-    fut = executor.submit(f, 1, 1)
+    fut = executor.submit(f, 1, 1)    
     yield eq_, executor.submit_count, 1
     yield eq_, fut.result(), 2
-    output = load(pjoin(fut.job_path, 'output.pkl'))
-    yield eq_, output, ('finished', 2)
-    yield eq_, ls(fut.job_path), ['input.pkl', 'jobscript', 'output.pkl']
-    yield eq_, len(executor.given_work_paths), 1
     yield ne_, executor.given_work_paths[0], fut.job_path
-
+    with working_directory(fut.job_path):
+        output = load('output.pkl')
+        yield eq_, output, ('finished', 2)
+        yield eq_, ls(), COMPUTED_LS
+        yield eq_, len(executor.given_work_paths), 1
+        yield eq_, filecontents('jobid'), 'job-0\n'
 
     # Re-run and check that result is loaded from cache
     fut = executor.submit(f, 1, 1)
@@ -126,10 +143,11 @@ def test_basic():
     yield eq_, executor.submit_count, 2
     yield ne_, fut2.job_path, fut.job_path
 
-    # Run tests created by before_submit
+    # Run tests queued by closures
     yield eq_, len(tests), 3
     for x in tests:
         yield x
     
 
 
+    

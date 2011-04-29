@@ -254,3 +254,12 @@ class DirectoryFuture(ClusterFuture):
     def _load_output(self):
         self._executor.logger.debug('Loading job output: %s', self.job_name)
         return numpy_pickle.load(pjoin(self.job_path, 'output.pkl'))
+
+    def submit(self):
+        jobid = self._submit()
+        with file(pjoin(self.job_path, 'jobid'), 'w') as f:
+            f.write(jobid + '\n')
+        with file(pjoin(self.job_path, 'log'), 'w') as f:
+            f.write('%s submitted job (%s), waiting to start\n' %
+                    (time.strftime('%Y-%m-%d %H:%M:%S'), jobid))
+        return jobid
