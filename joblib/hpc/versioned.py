@@ -2,8 +2,16 @@ from functools import wraps
 from ..func_inspect import filter_args, get_func_code, get_func_name
 from ..hashing import hash
 import hashlib
+import base64
 
 __all__ = ['versioned']
+
+def encode_digest_base64(digest):
+    # Use base64 but ensure there's no padding (pad digest up front).
+    # Replace / with _ in alphabet.
+    while (len(digest) * 8 % 6) != 0:
+        digest += '\0'
+    return base64.b64encode(digest, '_+')
 
 def versioned_call(func, *args, **kwargs):
     """ Calls a function and tracks versioned functions being called.
@@ -38,18 +46,20 @@ def versioned(version=None, deps=True, ignore=()):
         version = None
     def dec(func):
         # Make hash. The function hash does not consider dependencies.
+        _version = version
         h = hashlib.sha1()
         module, name = get_func_name(func)
         h.update('.'.join(module + [name]))
         h.update('$')
         if version is None:
-            # No manual version, so should hash by contents
+            # No manual version; use the hash of the contents as version
             src, source_file, lineno = get_func_code(func)
-            h.update(src)
+            _version = encode_digest_base64(hashlib.sha1(src).digest())
         else:
-            h.update(str(version))
+            _version = str(version)
+        h.update(_version.encode('UTF-8'))
         # Store information
-        func.version_info = dict(version=version,
+        func.version_info = dict(version=_version,
                                  ignore_deps=deps == False,
                                  ignore_args=tuple(ignore),
                                  digest=h.digest(),

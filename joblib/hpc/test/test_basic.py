@@ -23,8 +23,7 @@ def test_versioned():
         yield eq_, len(d['digest']), 20
         del d['digest']
         del d['hexdigest']
-        yield eq_, d, dict(version=4, ignore_deps=True, ignore_args=('y',))
-    
+        yield eq_, d, dict(version='4', ignore_deps=True, ignore_args=('y',))
 
     yield ok_, hasattr(g, 'version_info')
     if hasattr(g, 'version_info'):
@@ -32,4 +31,5 @@ def test_versioned():
         yield eq_, len(d['digest']), 20
         del d['digest']
         del d['hexdigest']
-        yield eq_, d, dict(version=None, ignore_deps=False, ignore_args=())
+        yield eq_, d, dict(version='J8GOY5TQ4zEWPVF7EHkqfgaTuZUA',
+                           ignore_deps=False, ignore_args=())
