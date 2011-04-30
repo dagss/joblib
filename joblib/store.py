@@ -67,7 +67,7 @@ try:
     # latter works across (some) network filesystems. Do not mix the
     # two.
     from fcntl import lockf as fcntl_lockf, LOCK_EX, LOCK_SH, LOCK_UN, LOCK_NB
-    from errno import EACCES, EAGAIN    
+    from errno import EACCES, EAGAIN, EEXIST
 except ImportError:
     fcntl_lockf = None
 try:
@@ -310,9 +310,22 @@ class TaskData(object):
 
             if self._use_file_locks:
                 # Try to acquire pessimistic file lock. We don't rely on this, but
-                # it can save us CPU time if it does work
+                # it can save us CPU time if it does work.
+
+                # Note that we value not causing deadlock over portability;
+                # therefore we rely on lockf rather than the link trick documented
+                # in "man open"
+                
+                1/0 # below must be fixed, not even sure how...
+                
                 if fcntl_lockf is not None:
-                    self._lockfile = file(self._lockfilename, 'a')
+                    try:
+                        self._lockfile = os.open(self._lockfilename,
+                                                 os.O_RDWR | os.O_CREAT | os.O_EXCL)
+                    except OSError, e:
+                        if e.errno == EEXIST:
+                            
+                        
                     try:
                         # Get lock
                         fcntl_lockf(self._lockfile, LOCK_EX | (LOCK_NB if not blocking else 0))
@@ -373,7 +386,7 @@ class TaskData(object):
             except (OSError, IOError):
                 pass
             try:
-                self._lockfile.close()
+                os.close(self._lockfile)
             except OSError:
                 pass
             try:

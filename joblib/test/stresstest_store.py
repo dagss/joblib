@@ -7,12 +7,13 @@ import random
 import joblib
 from joblib.store import *
 
-def stresstest(path, end_time, seed, result_queue, callid):
+def stresstest(args, end_time, seed, result_queue, callid):
+    path = args.storepath
     rng = random.Random(seed)
     store = DirectoryStore(path)
     counts = {MUST_COMPUTE: 0, COMPUTED: 0, WAIT: 0}
     while time.time() < end_time:
-        item = store.get(['foo', str(rng.randrange(0, 1000))])
+        item = store.get(['foo', str(rng.randrange(0, 0.5 * args.nprocs))])
         try:
             blocking = rng.uniform(0, 1) < 0.5
             state = item.attempt_compute_lock(blocking=blocking)
@@ -52,7 +53,7 @@ if __name__ == '__main__':
     q = multiprocessing.Queue()
     processes = [multiprocessing.Process(
                      target=stresstest,
-                     args=(args.storepath, end_time, random.randint(0, 2**31), q, callid))
+                     args=(args, end_time, random.randint(0, 2**31), q, callid))
                  for callid in range(args.nprocs)]
     for x in processes:
         x.start()
