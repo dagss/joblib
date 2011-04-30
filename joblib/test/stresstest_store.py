@@ -7,7 +7,7 @@ import random
 import joblib
 from joblib.store import *
 
-def stresstest(path, end_time, seed, result_queue):
+def stresstest(path, end_time, seed, result_queue, callid):
     rng = random.Random(seed)
     store = DirectoryStore(path)
     counts = {MUST_COMPUTE: 0, COMPUTED: 0, WAIT: 0}
@@ -35,7 +35,7 @@ def stresstest(path, end_time, seed, result_queue):
                 assert False
         finally:
             item.close()
-    result_queue.put(counts)
+    result_queue.put((callid, counts))
 
 if __name__ == '__main__':
     import argparse
@@ -52,16 +52,33 @@ if __name__ == '__main__':
     q = multiprocessing.Queue()
     processes = [multiprocessing.Process(
                      target=stresstest,
-                     args=(args.storepath, end_time, random.randint(0, 2**31), q))
-                 for x in range(args.nprocs)]
+                     args=(args.storepath, end_time, random.randint(0, 2**31), q, callid))
+                 for callid in range(args.nprocs)]
     for x in processes:
         x.start()
+
+    # We must simultanously check for killed processes, and
+    # reduce the contents put in queue by living processes.
+    counts = {MUST_COMPUTE: 0, COMPUTED: 0, WAIT: 0}
+    killed = set()
+    returned = set()
+    while len(killed) + len(returned) < args.nprocs:
+        while not q.empty():
+            procid, result = q.get()
+            returned.add(procid)
+            for key in counts:
+                counts[key] += result[key]
+        for idx, proc in enumerate(processes):
+            if idx in returned:
+                continue
+            if not proc.is_alive():
+                killed.add(idx)
+        time.sleep(0.1)
+            
+        
+    print counts
+
+
     for x in processes:
         x.join()
 
-    counts = {MUST_COMPUTE: 0, COMPUTED: 0, WAIT: 0}
-    while not q.empty():
-        x = q.get()
-        for key in counts:
-            counts[key] += x[key]
-    print counts
